@@ -8,33 +8,24 @@ const TRACKED_SYMBOLS = [
   'AVAXUSDT', 'LINKUSDT', 'MATICUSDT', 'APTUSDT', 'NEARUSDT'
 ];
 
-const BINANCE_BASE = 'https://api.binance.com';
-
-// --- Server-side signing (secret stays on server) ---
-async function signQuery(queryString) {
-  const res = await fetch('/api/sign', {
+// --- All Binance calls go through /api/proxy (avoids CORS + geo-block) ---
+async function binanceSigned(path, params = {}) {
+  const res = await fetch('/api/proxy', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ queryString }),
+    body: JSON.stringify({ path, params: { ...params, _signed: true } }),
   });
-  if (!res.ok) throw new Error('Signing failed');
-  return res.json(); // { signature, apiKey }
-}
-
-// --- Binance API helpers (called from browser → Dubai IP → Binance) ---
-async function binanceSigned(path, params = {}) {
-  const timestamp = Date.now();
-  const qs = new URLSearchParams({ ...params, timestamp: String(timestamp) }).toString();
-  const { signature, apiKey } = await signQuery(qs);
-  const url = `${BINANCE_BASE}${path}?${qs}&signature=${signature}`;
-  const res = await fetch(url, { headers: { 'X-MBX-APIKEY': apiKey } });
+  if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
   return res.json();
 }
 
 async function binancePublic(path, params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const url = `${BINANCE_BASE}${path}${qs ? '?' + qs : ''}`;
-  const res = await fetch(url);
+  const res = await fetch('/api/proxy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, params }),
+  });
+  if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
   return res.json();
 }
 
