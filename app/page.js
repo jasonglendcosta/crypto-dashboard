@@ -30,16 +30,10 @@ const fmt = {
   },
   qty(n) { return n >= 1 ? n.toFixed(4) : n.toFixed(6); },
   time(ts) { return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); },
-  dur(ms) {
-    if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-    if (ms < 3600000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
-    return `${Math.floor(ms / 3600000)}h ${Math.floor((ms % 3600000) / 60000)}m`;
-  },
   pct(n) { return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; },
 };
 
 // ===================== MERGE PARTIAL FILLS =====================
-// Binance splits large orders into multiple fills at same price/second — merge them
 function mergePartialFills(trades) {
   if (!trades.length) return [];
   const sorted = [...trades].sort((a, b) => a.time - b.time);
@@ -52,20 +46,17 @@ function mergePartialFills(trades) {
     const quoteQty = parseFloat(t.quoteQty);
     const commission = parseFloat(t.commission);
 
-    // Merge if same order (orderId), same side, same price, within 2 seconds
     if (current && current.orderId === t.orderId && current.isBuyer === t.isBuyer && current.price === price) {
       current.qty += qty;
       current.quoteQty += quoteQty;
       current.commission += commission;
       current.fillCount++;
-      current.timeEnd = t.time;
     } else {
       if (current) merged.push(current);
       current = {
-        id: t.id, orderId: t.orderId, time: t.time, timeEnd: t.time,
+        id: t.id, orderId: t.orderId, time: t.time,
         isBuyer: t.isBuyer, isMaker: t.isMaker, price, qty, quoteQty,
         commission, commissionAsset: t.commissionAsset, fillCount: 1,
-        symbol: t.symbol,
       };
     }
   }
@@ -73,66 +64,93 @@ function mergePartialFills(trades) {
   return merged;
 }
 
-// ===================== P&L CALCULATION (FIFO) =====================
-function calculatePnL(mergedTrades, currentPrice, bnbPrice) {
-  const buys = [];
-  const rounds = [];
-  let totalRealizedPnl = 0, totalFees = 0;
-
-  const feeToUSD = (commission, asset, price) => {
+// ===================== BUILD TRADE LOG WITH INLINE FIFO P&L =====================
+function buildTradeLog(mergedTrades, currentPrice, bnbPrice) {
+  const feeToUSD = (commission, asset, tradePrice) => {
     if (asset === 'USDT') return commission;
     if (asset === 'BNB') return commission * bnbPrice;
-    return commission * price;
+    return commission * tradePrice;
   };
+
+  // FIFO buy queue: each entry tracks remaining qty + proportional fee
+  const buyQueue = [];
+  const trades = [];
+
+  let totalRealizedPnl = 0;
+  let totalUnrealizedPnl = 0;
+  let totalFees = 0;
 
   for (const t of mergedTrades) {
     const feeUSD = feeToUSD(t.commission, t.commissionAsset, t.price);
+    totalFees += feeUSD;
+
+    const entry = {
+      id: t.id, orderId: t.orderId, time: t.time,
+      side: t.isBuyer ? 'BUY' : 'SELL',
+      price: t.price, qty: t.qty, quoteQty: t.quoteQty,
+      feeUSD, feePct: t.quoteQty > 0 ? (feeUSD / t.quoteQty) * 100 : 0,
+      feeAsset: t.commissionAsset, isMaker: t.isMaker, fillCount: t.fillCount,
+      pnl: null,          // realized P&L (sells only)
+      unrealizedPnl: null, // unrealized P&L (open buys only)
+    };
 
     if (t.isBuyer) {
-      buys.push({ price: t.price, qty: t.qty, feeUSD, time: t.time });
-    } else {
-      let remainSell = t.qty;
-      while (remainSell > 0 && buys.length > 0) {
-        const buy = buys[0];
-        const matchQty = Math.min(remainSell, buy.qty);
-        const grossPnl = (t.price - buy.price) * matchQty;
-        const buyFeeShare = buy.feeUSD * (matchQty / buy.qty);
-        const sellFeeShare = feeUSD * (matchQty / t.qty);
-        const totalFee = buyFeeShare + sellFeeShare;
-        const netPnl = grossPnl - totalFee;
-
-        rounds.push({
-          type: 'closed', buyPrice: buy.price, sellPrice: t.price, qty: matchQty,
-          grossPnl, buyFee: buyFeeShare, sellFee: sellFeeShare, totalFee,
-          netPnl, netPct: buy.price > 0 ? (netPnl / (buy.price * matchQty)) * 100 : 0,
-          holdTimeMs: t.time - buy.time,
-        });
-        totalRealizedPnl += netPnl;
-        totalFees += totalFee;
-        buy.qty -= matchQty;
-        remainSell -= matchQty;
-        if (buy.qty <= 0) buys.shift();
-      }
-    }
-  }
-
-  let totalUnrealizedPnl = 0;
-  for (const buy of buys) {
-    if (buy.qty > 0) {
-      const grossPnl = (currentPrice - buy.price) * buy.qty;
-      const netPnl = grossPnl - buy.feeUSD;
-      totalUnrealizedPnl += netPnl;
-      totalFees += buy.feeUSD;
-      rounds.push({
-        type: 'open', buyPrice: buy.price, sellPrice: null, currentPrice, qty: buy.qty,
-        grossPnl, buyFee: buy.feeUSD, sellFee: 0, totalFee: buy.feeUSD,
-        netPnl, netPct: buy.price > 0 ? (netPnl / (buy.price * buy.qty)) * 100 : 0,
-        holdTimeMs: Date.now() - buy.time,
+      // Push to FIFO queue with original qty and fee for later matching
+      buyQueue.push({
+        price: t.price,
+        origQty: t.qty,
+        remainQty: t.qty,
+        feeUSD,
+        tradeIdx: trades.length, // index in trades array for back-reference
       });
+    } else {
+      // FIFO match: consume oldest buys first
+      let remainSell = t.qty;
+      let realizedPnl = 0;
+
+      while (remainSell > 0.000001 && buyQueue.length > 0) {
+        const buy = buyQueue[0];
+        const matchQty = Math.min(remainSell, buy.remainQty);
+
+        const grossPnl = (t.price - buy.price) * matchQty;
+        const buyFeeShare = buy.feeUSD * (matchQty / buy.origQty);
+        const sellFeeShare = feeUSD * (matchQty / t.qty);
+        const netPnl = grossPnl - buyFeeShare - sellFeeShare;
+
+        realizedPnl += netPnl;
+        buy.remainQty -= matchQty;
+        remainSell -= matchQty;
+
+        if (buy.remainQty < 0.000001) buyQueue.shift();
+      }
+
+      entry.pnl = realizedPnl;
+      totalRealizedPnl += realizedPnl;
+    }
+
+    trades.push(entry);
+  }
+
+  // Now calculate unrealized P&L for remaining open buys
+  for (const buy of buyQueue) {
+    if (buy.remainQty > 0.000001) {
+      const grossPnl = (currentPrice - buy.price) * buy.remainQty;
+      const feeShare = buy.feeUSD * (buy.remainQty / buy.origQty);
+      const netPnl = grossPnl - feeShare;
+      totalUnrealizedPnl += netPnl;
+
+      // Update the original trade entry with unrealized P&L
+      trades[buy.tradeIdx].unrealizedPnl = netPnl;
     }
   }
 
-  return { rounds, totalRealizedPnl, totalUnrealizedPnl, totalPnl: totalRealizedPnl + totalUnrealizedPnl, totalFees };
+  return {
+    trades,
+    totalRealizedPnl,
+    totalUnrealizedPnl,
+    totalPnl: totalRealizedPnl + totalUnrealizedPnl,
+    totalFees,
+  };
 }
 
 // ===================== DATA FETCHING =====================
@@ -152,7 +170,10 @@ async function fetchAllData() {
 
   const activeSymbols = tradeResults.filter(r => r.trades.length > 0);
   let bnbPrice = 630;
-  try { const bp = await proxy('/api/v3/ticker/price', { symbol: 'BNBUSDT' }); if (bp.price) bnbPrice = parseFloat(bp.price); } catch {}
+  try {
+    const bp = await proxy('/api/v3/ticker/price', { symbol: 'BNBUSDT' });
+    if (bp.price) bnbPrice = parseFloat(bp.price);
+  } catch {}
 
   const enriched = await Promise.all(
     activeSymbols.map(async ({ symbol, trades }) => {
@@ -173,56 +194,20 @@ async function fetchAllData() {
       } catch {}
 
       const merged = mergePartialFills(trades);
-      const pnl = calculatePnL(merged, currentPrice, bnbPrice);
+      const result = buildTradeLog(merged, currentPrice, bnbPrice);
 
-      const feeToUSD = (c, a) => a === 'USDT' ? c : a === 'BNB' ? c * bnbPrice : c * currentPrice;
-
-      // Map round-trip P&L back onto individual trades
-      // Sells get realized P&L, open buys get unrealized P&L
-      const sellPnlMap = new Map(); // sellTime -> aggregated netPnl
-      const openBuyPnlMap = new Map(); // buyPrice (rounded) -> netPnl
-      for (const r of pnl.rounds) {
-        if (r.type === 'closed' && r.sellTime) {
-          // Group by sell time (multiple rounds can match same sell)
-          const existing = sellPnlMap.get(r.sellTime) || 0;
-          sellPnlMap.set(r.sellTime, existing + r.netPnl);
-        } else if (r.type === 'open') {
-          // Map open positions by buy price
-          const key = r.buyPrice.toFixed(8);
-          const existing = openBuyPnlMap.get(key) || 0;
-          openBuyPnlMap.set(key, existing + r.netPnl);
-        }
-      }
-
-      const tradeLog = merged.map(t => {
-        const feeUSD = feeToUSD(t.commission, t.commissionAsset);
-        const side = t.isBuyer ? 'BUY' : 'SELL';
-
-        let tradePnl = null;
-        let unrealizedPnl = null;
-
-        if (!t.isBuyer) {
-          // Check if this sell has matched round-trip P&L
-          tradePnl = sellPnlMap.get(t.time) ?? null;
-        } else {
-          // Check if this buy has an open position
-          const key = t.price.toFixed(8);
-          if (openBuyPnlMap.has(key)) {
-            unrealizedPnl = openBuyPnlMap.get(key);
-            openBuyPnlMap.delete(key); // consume so we don't double-count
-          }
-        }
-
-        return {
-          id: t.id, orderId: t.orderId, time: t.time, side,
-          price: t.price, qty: t.qty, quoteQty: t.quoteQty,
-          feeUSD, feePct: t.quoteQty > 0 ? (feeUSD / t.quoteQty) * 100 : 0,
-          feeAsset: t.commissionAsset, isMaker: t.isMaker, fillCount: t.fillCount,
-          pnl: tradePnl, unrealizedPnl,
-        };
-      });
-
-      return { symbol, asset, currentPrice, ticker, trades: tradeLog, pnl, rawTradeCount: trades.length, mergedTradeCount: merged.length };
+      return {
+        symbol, asset, currentPrice, ticker,
+        trades: result.trades,
+        pnl: {
+          totalRealizedPnl: result.totalRealizedPnl,
+          totalUnrealizedPnl: result.totalUnrealizedPnl,
+          totalPnl: result.totalPnl,
+          totalFees: result.totalFees,
+        },
+        rawTradeCount: trades.length,
+        mergedTradeCount: merged.length,
+      };
     })
   );
 
@@ -265,9 +250,13 @@ async function fetchAllData() {
   return {
     symbols: enriched, portfolio,
     summary: {
-      totalTrades, mergedTrades: enriched.reduce((s, e) => s + e.mergedTradeCount, 0),
-      totalVolume, realizedPnl: dailyRealizedPnl, unrealizedPnl: dailyUnrealizedPnl,
-      totalPnl: dailyRealizedPnl + dailyUnrealizedPnl, totalFees: dailyFees,
+      totalTrades,
+      mergedTrades: enriched.reduce((s, e) => s + e.mergedTradeCount, 0),
+      totalVolume,
+      realizedPnl: dailyRealizedPnl,
+      unrealizedPnl: dailyUnrealizedPnl,
+      totalPnl: dailyRealizedPnl + dailyUnrealizedPnl,
+      totalFees: dailyFees,
       feePercent: totalVolume > 0 ? (dailyFees / totalVolume) * 100 : 0,
     },
   };
@@ -296,7 +285,7 @@ export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState(null);
   const [countdown, setCountdown] = useState(30);
   const [expandedSymbol, setExpandedSymbol] = useState(null);
-  const [viewMode, setViewMode] = useState('all'); // all | buys | sells
+  const [viewMode, setViewMode] = useState('all');
   const timerRef = useRef(null);
 
   const fetchAll = useCallback(async () => {
@@ -322,7 +311,7 @@ export default function Dashboard() {
 
   return (
     <div className="dash">
-      {/* ===== HEADER ===== */}
+      {/* HEADER */}
       <header className="hdr">
         <div className="hdr-l">
           <h1>⚡ CRYPTO COMMAND</h1>
@@ -337,10 +326,10 @@ export default function Dashboard() {
 
       {error && <div className="err">⚠️ {error} <button onClick={fetchAll}>Retry</button></div>}
 
-      {/* ===== P&L HERO ===== */}
+      {/* P&L HERO */}
       <div className={`hero ${summary.totalPnl >= 0 ? 'hero-g' : 'hero-r'}`}>
         <div className="hero-main">
-          <span className="hero-lbl">Today's P&L</span>
+          <span className="hero-lbl">Today&apos;s P&amp;L</span>
           <PnL value={summary.totalPnl || 0} size="xl" />
         </div>
         <div className="hero-stats">
@@ -350,7 +339,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ===== QUICK STATS ===== */}
+      {/* QUICK STATS */}
       <div className="pills">
         <div className="pill"><span className="pill-l">Fills</span><span className="pill-v accent">{summary.totalTrades || 0}</span></div>
         <div className="pill"><span className="pill-l">Orders</span><span className="pill-v accent">{summary.mergedTrades || 0}</span></div>
@@ -360,7 +349,7 @@ export default function Dashboard() {
         <div className="pill"><span className="pill-l">Avg Fee</span><span className="pill-v fee-val">{(summary.feePercent || 0).toFixed(3)}%</span></div>
       </div>
 
-      {/* ===== VIEW MODE TOGGLE ===== */}
+      {/* VIEW MODE TOGGLE */}
       {hasTrades && (
         <div className="view-toggle">
           <button className={`vt-btn ${viewMode === 'all' ? 'active' : ''}`} onClick={() => setViewMode('all')}>All Trades</button>
@@ -369,7 +358,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ===== TRADES BY ASSET ===== */}
+      {/* TRADES BY ASSET */}
       {hasTrades ? (
         <div className="trades-sec">
           {symbols.map((sym) => {
@@ -377,7 +366,6 @@ export default function Dashboard() {
             const { pnl } = sym;
             const isProfitable = pnl.totalPnl >= 0;
 
-            // Filter trades by view mode
             const filteredTrades = sym.trades.filter(t =>
               viewMode === 'all' ? true : viewMode === 'buys' ? t.side === 'BUY' : t.side === 'SELL'
             );
@@ -386,7 +374,6 @@ export default function Dashboard() {
             const sellTrades = sym.trades.filter(t => t.side === 'SELL');
             const buyVol = buyTrades.reduce((s, t) => s + t.quoteQty, 0);
             const sellVol = sellTrades.reduce((s, t) => s + t.quoteQty, 0);
-            const totalFees = sym.trades.reduce((s, t) => s + t.feeUSD, 0);
             const hasBnbFees = sym.trades.some(t => t.feeAsset === 'BNB');
 
             return (
@@ -428,13 +415,13 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* Trade Log — Clean, Merged + P&L */}
+                    {/* Order Log */}
                     <div className="tlog">
                       <h4>📋 Order Log {filteredTrades.length !== sym.trades.length && `(${viewMode})`}</h4>
                       <div className="ltable">
                         <div className="lrow lhead">
                           <span>Time</span><span>Side</span><span>Price</span><span>Qty</span>
-                          <span>Total</span><span>Fee</span><span>Fee %</span><span>P&L</span><span>Type</span>
+                          <span>Total</span><span>Fee</span><span>Fee %</span><span>P&amp;L</span><span>Type</span>
                         </div>
                         {[...filteredTrades].reverse().map((t) => (
                           <div key={t.id} className={`lrow ${t.side === 'BUY' ? 'lbuy' : 'lsell'}`}>
@@ -448,7 +435,14 @@ export default function Dashboard() {
                               {t.feeAsset === 'BNB' && <span className="bnb-tag">BNB</span>}
                             </span>
                             <span className="fee-val">{t.feePct.toFixed(3)}%</span>
-                            <span>{t.side === 'SELL' && t.pnl != null ? <PnL value={t.pnl} /> : t.side === 'BUY' && t.unrealizedPnl != null ? <span className="unreal"><PnL value={t.unrealizedPnl} /><span className="unreal-tag">open</span></span> : <span className="text2">—</span>}</span>
+                            <span>
+                              {t.pnl != null
+                                ? <PnL value={t.pnl} />
+                                : t.unrealizedPnl != null
+                                  ? <span className="unreal"><PnL value={t.unrealizedPnl} /><span className="unreal-tag">open</span></span>
+                                  : <span className="text2">—</span>
+                              }
+                            </span>
                             <span><Badge type={t.isMaker ? 'maker' : 'taker'}>{t.isMaker ? 'Maker' : 'Taker'}</Badge></span>
                           </div>
                         ))}
@@ -475,7 +469,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ===== FOOTER ===== */}
+      {/* FOOTER */}
       <footer className="ftr">
         <span>Updated: {lastRefresh?.toLocaleTimeString() || '—'}</span>
         <span>Next: {countdown}s</span>
