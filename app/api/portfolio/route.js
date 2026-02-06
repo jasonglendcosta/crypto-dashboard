@@ -1,26 +1,19 @@
 /**
- * Portfolio API — Vercel Edge Runtime
+ * Portfolio API — Node.js Runtime (pinned to Singapore region)
  * 
- * Runs at the NEAREST EDGE to the requesting user (Dubai for Jason).
- * Bypasses Binance's US geo-block.
+ * Edge runtime was geo-blocked by Binance. Node.js + region pin = reliable.
  */
 
-export const runtime = 'edge';
+import crypto from 'crypto';
+
+export const runtime = 'nodejs';
+export const preferredRegion = 'sin1'; // Singapore — closest to Binance + Dubai
 
 const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', 'https://api.binance.com'];
 
-async function generateSignature(queryString) {
+function generateSignature(queryString) {
   const secret = process.env.BINANCE_SECRET;
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(queryString));
-  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
 async function binanceFetch(path, apiKey, signed = false) {
@@ -42,7 +35,7 @@ export async function GET() {
     const API_KEY = process.env.BINANCE_API_KEY;
     const timestamp = Date.now();
     const query = `timestamp=${timestamp}`;
-    const signature = await generateSignature(query);
+    const signature = generateSignature(query);
 
     const account = await binanceFetch(
       `/api/v3/account?${query}&signature=${signature}`,
@@ -57,7 +50,6 @@ export async function GET() {
         prices: {},
         error: account?.msg || 'No data',
         lastUpdated: new Date().toISOString(),
-        edge: true,
       }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -100,7 +92,6 @@ export async function GET() {
       prices,
       change24h: 2.4,
       lastUpdated: new Date().toISOString(),
-      edge: true,
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },

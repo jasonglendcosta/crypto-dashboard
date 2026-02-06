@@ -1,13 +1,14 @@
 /**
- * Trades API — Vercel Edge Runtime
+ * Trades API — Node.js Runtime (pinned to Singapore region)
  * 
- * Runs at the NEAREST EDGE to the requesting user (Dubai for Jason).
- * This bypasses Binance's US geo-block since Edge != US East datacenter.
- * 
- * Edge Runtime uses Web Crypto API (no Node.js crypto module).
+ * Edge runtime was silently failing: Vercel Edge nodes in US/EU get
+ * geo-blocked by Binance. Node.js runtime + region pin = reliable.
  */
 
-export const runtime = 'edge';
+import crypto from 'crypto';
+
+export const runtime = 'nodejs';
+export const preferredRegion = 'sin1'; // Singapore — closest to Binance + Dubai
 
 const TRACKED_SYMBOLS = [
   'BTCUSDT', 'TAOUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT',
@@ -18,19 +19,10 @@ const TRACKED_SYMBOLS = [
 
 const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', 'https://api.binance.com'];
 
-// Web Crypto API HMAC-SHA256 (Edge compatible)
-async function generateSignature(queryString) {
+// Node.js HMAC-SHA256
+function generateSignature(queryString) {
   const secret = process.env.BINANCE_SECRET;
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(queryString));
-  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
 function getTodayStartUTC() {
@@ -41,7 +33,8 @@ function getTodayStartUTC() {
 
 async function fetchSymbolTrades(symbol, startTime, timestamp, apiKey) {
   const query = `symbol=${symbol}&startTime=${startTime}&timestamp=${timestamp}`;
-  const signature = await generateSignature(query);
+  const signature = generateSignature(query);
+  let lastError = null;
 
   for (const base of BINANCE_BASES) {
     try {
@@ -52,9 +45,11 @@ async function fetchSymbolTrades(symbol, startTime, timestamp, apiKey) {
       const data = await res.json();
       if (Array.isArray(data)) return data;
       if (data?.code === -2015 || data?.code === -1022) return [];
+      lastError = data;
       continue;
-    } catch { continue; }
+    } catch (e) { lastError = e.message; continue; }
   }
+  console.error(`[${symbol}] All Binance endpoints failed:`, lastError);
   return [];
 }
 
