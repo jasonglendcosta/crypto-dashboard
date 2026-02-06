@@ -4,16 +4,16 @@
  * Edge runtime was geo-blocked by Binance. Node.js + region pin = reliable.
  */
 
-import crypto from 'crypto';
-
 export const runtime = 'nodejs';
 export const preferredRegion = 'sin1'; // Singapore — closest to Binance + Dubai
+
+import { createHmac } from 'crypto';
 
 const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', 'https://api.binance.com'];
 
 function generateSignature(queryString) {
   const secret = process.env.BINANCE_SECRET;
-  return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
+  return createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
 async function binanceFetch(path, apiKey, signed = false) {

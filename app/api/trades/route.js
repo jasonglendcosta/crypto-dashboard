@@ -5,10 +5,10 @@
  * geo-blocked by Binance. Node.js runtime + region pin = reliable.
  */
 
-import crypto from 'crypto';
-
 export const runtime = 'nodejs';
 export const preferredRegion = 'sin1'; // Singapore — closest to Binance + Dubai
+
+import { createHmac } from 'crypto';
 
 const TRACKED_SYMBOLS = [
   'BTCUSDT', 'TAOUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT',
@@ -22,7 +22,7 @@ const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', '
 // Node.js HMAC-SHA256
 function generateSignature(queryString) {
   const secret = process.env.BINANCE_SECRET;
-  return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
+  return createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
 function getTodayStartUTC() {
