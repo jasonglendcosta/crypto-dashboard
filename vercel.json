@@ -1,0 +1,8 @@
+{
+  "regions": ["sin1"],
+  "functions": {
+    "app/api/**/*.js": {
+      "maxDuration": 30
+    }
+  }
+}
