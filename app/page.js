@@ -1,6 +1,44 @@
 'use client';
 import { useState, useEffect, useCallback, useRef } from 'react';
 
+const TRACKED_SYMBOLS = [
+  'BTCUSDT', 'TAOUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT',
+  'ICPUSDT', 'FILUSDT', 'FETUSDT', 'ONDOUSDT', 'JUPUSDT',
+  'ARKMUSDT', 'RNDRUSDT', 'INJUSDT', 'ETHUSDT', 'DOTUSDT',
+  'AVAXUSDT', 'LINKUSDT', 'MATICUSDT', 'APTUSDT', 'NEARUSDT'
+];
+
+const BINANCE_BASE = 'https://api.binance.com';
+
+// --- Server-side signing (secret stays on server) ---
+async function signQuery(queryString) {
+  const res = await fetch('/api/sign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queryString }),
+  });
+  if (!res.ok) throw new Error('Signing failed');
+  return res.json(); // { signature, apiKey }
+}
+
+// --- Binance API helpers (called from browser → Dubai IP → Binance) ---
+async function binanceSigned(path, params = {}) {
+  const timestamp = Date.now();
+  const qs = new URLSearchParams({ ...params, timestamp: String(timestamp) }).toString();
+  const { signature, apiKey } = await signQuery(qs);
+  const url = `${BINANCE_BASE}${path}?${qs}&signature=${signature}`;
+  const res = await fetch(url, { headers: { 'X-MBX-APIKEY': apiKey } });
+  return res.json();
+}
+
+async function binancePublic(path, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${BINANCE_BASE}${path}${qs ? '?' + qs : ''}`;
+  const res = await fetch(url);
+  return res.json();
+}
+
+// --- Formatting ---
 function formatUSD(n) {
   if (n == null || isNaN(n)) return '$0.00';
   const abs = Math.abs(n);
@@ -28,33 +66,201 @@ function formatDuration(ms) {
 function PnlBadge({ value, size = 'normal' }) {
   const isPositive = value >= 0;
   const cls = `pnl-badge ${isPositive ? 'positive' : 'negative'} ${size}`;
-  return (
-    <span className={cls}>
-      {isPositive ? '▲' : '▼'} {formatUSD(value)}
-    </span>
-  );
+  return <span className={cls}>{isPositive ? '▲' : '▼'} {formatUSD(value)}</span>;
 }
 
 function PnlPercent({ value }) {
   const isPositive = value >= 0;
-  return (
-    <span className={`pnl-pct ${isPositive ? 'positive' : 'negative'}`}>
-      {isPositive ? '+' : ''}{value.toFixed(2)}%
-    </span>
-  );
+  return <span className={`pnl-pct ${isPositive ? 'positive' : 'negative'}`}>{isPositive ? '+' : ''}{value.toFixed(2)}%</span>;
 }
 
-function FeeBadge({ usd, percent }) {
-  return (
-    <span className="fee-badge">
-      {formatUSD(usd)} <span className="fee-pct">({percent.toFixed(3)}%)</span>
-    </span>
-  );
+// --- P&L Calculation (FIFO matching) ---
+function calculatePnL(trades, currentPrice, bnbPrice) {
+  const buys = [];
+  const rounds = [];
+  let totalRealizedPnl = 0;
+  let totalFees = 0;
+
+  const sorted = [...trades].sort((a, b) => a.time - b.time);
+
+  for (const t of sorted) {
+    const price = parseFloat(t.price);
+    const qty = parseFloat(t.qty);
+    const commission = parseFloat(t.commission);
+    const commAsset = t.commissionAsset;
+    const feeUSD = commAsset === 'USDT' ? commission : commAsset === 'BNB' ? commission * bnbPrice : commission * currentPrice;
+
+    if (t.isBuyer) {
+      buys.push({ price, qty, feeUSD, time: t.time });
+    } else {
+      let remainSell = qty;
+      while (remainSell > 0 && buys.length > 0) {
+        const buy = buys[0];
+        const matchQty = Math.min(remainSell, buy.qty);
+        const grossPnl = (price - buy.price) * matchQty;
+        const buyFee = buy.feeUSD * (matchQty / (buy.qty + matchQty - remainSell || 1));
+        const sellFee = feeUSD * (matchQty / qty);
+        const totalFee = buyFee + sellFee;
+        const netPnl = grossPnl - totalFee;
+        const volume = (buy.price + price) * matchQty;
+
+        rounds.push({
+          type: 'closed', buyPrice: buy.price, sellPrice: price, qty: matchQty,
+          grossPnl, buyFee, sellFee, totalFee,
+          feePercent: volume > 0 ? (totalFee / volume) * 100 : 0,
+          netPnl, netPnlPercent: buy.price > 0 ? (netPnl / (buy.price * matchQty)) * 100 : 0,
+          holdTimeMs: t.time - buy.time,
+        });
+
+        totalRealizedPnl += netPnl;
+        totalFees += totalFee;
+        buy.qty -= matchQty;
+        remainSell -= matchQty;
+        if (buy.qty <= 0) buys.shift();
+      }
+    }
+  }
+
+  // Open positions
+  let totalUnrealizedPnl = 0;
+  for (const buy of buys) {
+    if (buy.qty > 0) {
+      const grossPnl = (currentPrice - buy.price) * buy.qty;
+      const netPnl = grossPnl - buy.feeUSD;
+      totalUnrealizedPnl += netPnl;
+      totalFees += buy.feeUSD;
+      rounds.push({
+        type: 'open', buyPrice: buy.price, sellPrice: null, currentPrice, qty: buy.qty,
+        grossPnl, buyFee: buy.feeUSD, sellFee: 0, totalFee: buy.feeUSD,
+        feePercent: buy.price > 0 ? (buy.feeUSD / (buy.price * buy.qty)) * 100 : 0,
+        netPnl, netPnlPercent: buy.price > 0 ? (netPnl / (buy.price * buy.qty)) * 100 : 0,
+        holdTimeMs: Date.now() - buy.time,
+      });
+    }
+  }
+
+  return { rounds, totalRealizedPnl, totalUnrealizedPnl, totalPnl: totalRealizedPnl + totalUnrealizedPnl, totalFees };
 }
 
+// --- Data fetching (all from browser) ---
+async function fetchAllData() {
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const startTime = todayStart.getTime();
+
+  // Fetch trades for all symbols in parallel
+  const tradeResults = await Promise.all(
+    TRACKED_SYMBOLS.map(async (symbol) => {
+      try {
+        const data = await binanceSigned('/api/v3/myTrades', { symbol, startTime: String(startTime) });
+        return { symbol, trades: Array.isArray(data) ? data : [] };
+      } catch {
+        return { symbol, trades: [] };
+      }
+    })
+  );
+
+  const activeSymbols = tradeResults.filter(r => r.trades.length > 0);
+
+  // Get BNB price for fee conversion
+  let bnbPrice = 600;
+  try {
+    const bp = await binancePublic('/api/v3/ticker/price', { symbol: 'BNBUSDT' });
+    if (bp.price) bnbPrice = parseFloat(bp.price);
+  } catch {}
+
+  // Enrich active symbols with price + ticker
+  const enriched = await Promise.all(
+    activeSymbols.map(async ({ symbol, trades }) => {
+      const asset = symbol.replace('USDT', '');
+      let currentPrice = 0, ticker = {};
+      try {
+        const [priceData, tickerData] = await Promise.all([
+          binancePublic('/api/v3/ticker/price', { symbol }),
+          binancePublic('/api/v3/ticker/24hr', { symbol }),
+        ]);
+        currentPrice = parseFloat(priceData.price || 0);
+        ticker = {
+          priceChangePercent: parseFloat(tickerData.priceChangePercent || 0),
+          highPrice: parseFloat(tickerData.highPrice || 0),
+          lowPrice: parseFloat(tickerData.lowPrice || 0),
+          quoteVolume: parseFloat(tickerData.quoteVolume || 0),
+        };
+      } catch {}
+
+      const pnl = calculatePnL(trades, currentPrice, bnbPrice);
+
+      const tradeLog = trades.map(t => {
+        const commission = parseFloat(t.commission);
+        const commAsset = t.commissionAsset;
+        const feeUSDT = commAsset === 'USDT' ? commission : commAsset === 'BNB' ? commission * bnbPrice : commission * currentPrice;
+        const quoteQty = parseFloat(t.quoteQty);
+        return {
+          id: t.id, time: t.time, side: t.isBuyer ? 'BUY' : 'SELL',
+          price: parseFloat(t.price), qty: parseFloat(t.qty), quoteQty,
+          feeUSDT, feePercent: quoteQty > 0 ? (feeUSDT / quoteQty) * 100 : 0,
+          isMaker: t.isMaker,
+        };
+      });
+
+      return { symbol, asset, currentPrice, ticker, trades: tradeLog, pnl };
+    })
+  );
+
+  // Summary
+  let totalTrades = 0, totalVolume = 0, dailyRealizedPnl = 0, dailyUnrealizedPnl = 0, dailyFees = 0;
+  enriched.forEach(e => {
+    dailyRealizedPnl += e.pnl.totalRealizedPnl;
+    dailyUnrealizedPnl += e.pnl.totalUnrealizedPnl;
+    dailyFees += e.pnl.totalFees;
+    totalTrades += e.trades.length;
+    e.trades.forEach(t => { totalVolume += t.quoteQty; });
+  });
+
+  // Also fetch portfolio
+  let portfolio = null;
+  try {
+    const account = await binanceSigned('/api/v3/account');
+    if (account && account.balances) {
+      const holdings = account.balances.filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0);
+      const symbolList = holdings.filter(h => h.asset !== 'USDT').map(h => h.asset + 'USDT');
+      
+      let prices = {};
+      if (symbolList.length > 0) {
+        try {
+          const pd = await binancePublic('/api/v3/ticker/price', { symbols: JSON.stringify(symbolList) });
+          if (Array.isArray(pd)) pd.forEach(p => { prices[p.symbol.replace('USDT', '')] = parseFloat(p.price); });
+        } catch {}
+      }
+
+      let totalValue = 0;
+      const items = holdings.map(h => {
+        const balance = parseFloat(h.free) + parseFloat(h.locked);
+        const price = prices[h.asset] || (h.asset === 'USDT' ? 1 : 0);
+        const value = balance * price;
+        totalValue += value;
+        return { asset: h.asset, balance, price, value };
+      });
+      portfolio = { holdings: items, totalValue };
+    }
+  } catch {}
+
+  return {
+    symbols: enriched,
+    summary: {
+      totalTrades, totalVolume,
+      realizedPnl: dailyRealizedPnl, unrealizedPnl: dailyUnrealizedPnl,
+      totalPnl: dailyRealizedPnl + dailyUnrealizedPnl,
+      totalFees: dailyFees, netPnl: dailyRealizedPnl + dailyUnrealizedPnl,
+      feePercent: totalVolume > 0 ? (dailyFees / totalVolume) * 100 : 0,
+    },
+    portfolio,
+  };
+}
+
+// ===================== DASHBOARD COMPONENT =====================
 export default function Dashboard() {
   const [data, setData] = useState(null);
-  const [portfolio, setPortfolio] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
@@ -64,17 +270,8 @@ export default function Dashboard() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [tradesRes, portfolioRes] = await Promise.all([
-        fetch('/api/trades', { cache: 'no-store' }),
-        fetch('/api/portfolio', { cache: 'no-store' }),
-      ]);
-      if (!tradesRes.ok) throw new Error(`Trades API: ${tradesRes.status}`);
-      const tradesData = await tradesRes.json();
-      setData(tradesData);
-      if (portfolioRes.ok) {
-        const pData = await portfolioRes.json();
-        setPortfolio(pData);
-      }
+      const result = await fetchAllData();
+      setData(result);
       setLastRefresh(new Date());
       setCountdown(30);
       setError(null);
@@ -111,6 +308,7 @@ export default function Dashboard() {
 
   const summary = data?.summary || {};
   const symbols = data?.symbols || [];
+  const portfolio = data?.portfolio;
   const hasTradesToday = symbols.length > 0;
 
   return (
@@ -210,15 +408,12 @@ export default function Dashboard() {
             const isExpanded = expandedSymbol === sym.symbol;
             const pnl = sym.pnl || {};
             const isProfitable = pnl.totalPnl >= 0;
-
-            // Calculate total fees for this symbol from trades
             const symbolFees = sym.trades.reduce((sum, t) => sum + (t.feeUSDT || 0), 0);
             const symbolVolume = sym.trades.reduce((sum, t) => sum + t.quoteQty, 0);
             const symbolFeePercent = symbolVolume > 0 ? (symbolFees / symbolVolume) * 100 : 0;
 
             return (
               <div key={sym.symbol} className={`symbol-card ${isProfitable ? 'profitable' : 'losing'}`}>
-                {/* Symbol Header */}
                 <div className="symbol-header" onClick={() => setExpandedSymbol(isExpanded ? null : sym.symbol)}>
                   <div className="symbol-left">
                     <span className="symbol-name">{sym.asset}</span>
@@ -248,33 +443,20 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Expanded Details */}
                 {isExpanded && (
                   <div className="symbol-details">
-                    {/* Round Trips */}
                     {pnl.rounds?.length > 0 && (
                       <div className="rounds-section">
                         <h4>Round Trips</h4>
                         <div className="rounds-table">
                           <div className="rounds-header">
-                            <span>Type</span>
-                            <span>Buy Price</span>
-                            <span>Sell Price</span>
-                            <span>Qty</span>
-                            <span>Gross P&L</span>
-                            <span>Buy Fee</span>
-                            <span>Sell Fee</span>
-                            <span>Total Fee</span>
-                            <span>Fee %</span>
-                            <span>Net P&L</span>
-                            <span>Net %</span>
-                            <span>Hold Time</span>
+                            <span>Type</span><span>Buy Price</span><span>Sell Price</span><span>Qty</span>
+                            <span>Gross P&L</span><span>Buy Fee</span><span>Sell Fee</span><span>Total Fee</span>
+                            <span>Fee %</span><span>Net P&L</span><span>Net %</span><span>Hold Time</span>
                           </div>
                           {pnl.rounds.map((r, i) => (
                             <div key={i} className={`rounds-row ${r.type} ${r.netPnl >= 0 ? 'row-green' : 'row-red'}`}>
-                              <span className={`round-type ${r.type}`}>
-                                {r.type === 'closed' ? '✅ Closed' : '🔓 Open'}
-                              </span>
+                              <span className={`round-type ${r.type}`}>{r.type === 'closed' ? '✅ Closed' : '🔓 Open'}</span>
                               <span>{formatUSD(r.buyPrice)}</span>
                               <span>{r.sellPrice ? formatUSD(r.sellPrice) : `→ ${formatUSD(r.currentPrice)}`}</span>
                               <span>{formatQty(r.qty)}</span>
@@ -288,38 +470,26 @@ export default function Dashboard() {
                               <span className="hold-time">{formatDuration(r.holdTimeMs)}</span>
                             </div>
                           ))}
-                          {/* Round trip totals */}
                           <div className="rounds-row rounds-total">
-                            <span>TOTAL</span>
-                            <span></span>
-                            <span></span>
-                            <span></span>
+                            <span>TOTAL</span><span></span><span></span><span></span>
                             <span><PnlBadge value={pnl.rounds.reduce((s, r) => s + r.grossPnl, 0)} /></span>
                             <span className="fee-cell">{formatUSD(pnl.rounds.reduce((s, r) => s + r.buyFee, 0))}</span>
                             <span className="fee-cell">{formatUSD(pnl.rounds.reduce((s, r) => s + r.sellFee, 0))}</span>
                             <span className="fee-cell-total">{formatUSD(pnl.totalFees)}</span>
                             <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span>
                             <span><PnlBadge value={pnl.totalPnl} /></span>
-                            <span></span>
-                            <span></span>
+                            <span></span><span></span>
                           </div>
                         </div>
                       </div>
                     )}
 
-                    {/* Trade Log */}
                     <div className="trades-log">
                       <h4>Trade Log</h4>
                       <div className="log-table">
                         <div className="log-header">
-                          <span>Time</span>
-                          <span>Side</span>
-                          <span>Price</span>
-                          <span>Qty</span>
-                          <span>Total</span>
-                          <span>Fee (USD)</span>
-                          <span>Fee %</span>
-                          <span>Type</span>
+                          <span>Time</span><span>Side</span><span>Price</span><span>Qty</span>
+                          <span>Total</span><span>Fee (USD)</span><span>Fee %</span><span>Type</span>
                         </div>
                         {sym.trades.map((t) => (
                           <div key={t.id} className={`log-row ${t.side === 'BUY' ? 'buy-row' : 'sell-row'}`}>
@@ -330,53 +500,32 @@ export default function Dashboard() {
                             <span>{formatUSD(t.quoteQty)}</span>
                             <span className="fee-cell">{formatUSD(t.feeUSDT)}</span>
                             <span className="fee-cell">{t.feePercent.toFixed(3)}%</span>
-                            <span className={`maker-badge ${t.isMaker ? 'maker' : 'taker'}`}>
-                              {t.isMaker ? 'Maker' : 'Taker'}
-                            </span>
+                            <span className={`maker-badge ${t.isMaker ? 'maker' : 'taker'}`}>{t.isMaker ? 'Maker' : 'Taker'}</span>
                           </div>
                         ))}
-                        {/* Trade log totals */}
                         <div className="log-row log-total">
-                          <span>TOTAL</span>
-                          <span>{sym.trades.length} trades</span>
-                          <span></span>
-                          <span></span>
+                          <span>TOTAL</span><span>{sym.trades.length} trades</span><span></span><span></span>
                           <span>{formatUSD(symbolVolume)}</span>
                           <span className="fee-cell-total">{formatUSD(symbolFees)}</span>
-                          <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span>
-                          <span></span>
+                          <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span><span></span>
                         </div>
                       </div>
                     </div>
 
-                    {/* Fee Breakdown Callout */}
                     <div className="fee-callout">
                       <div className="fee-callout-title">💰 Fee Impact</div>
                       <div className="fee-callout-grid">
-                        <div>
-                          <div className="fc-label">Total Fees</div>
-                          <div className="fc-value fee-highlight">{formatUSD(symbolFees)}</div>
-                        </div>
-                        <div>
-                          <div className="fc-label">Fee Rate</div>
-                          <div className="fc-value">{symbolFeePercent.toFixed(3)}%</div>
-                        </div>
-                        <div>
-                          <div className="fc-label">Break-even Spread</div>
-                          <div className="fc-value">{(symbolFeePercent * 2).toFixed(3)}%</div>
-                        </div>
-                        <div>
-                          <div className="fc-label">Fees as % of P&L</div>
+                        <div><div className="fc-label">Total Fees</div><div className="fc-value fee-highlight">{formatUSD(symbolFees)}</div></div>
+                        <div><div className="fc-label">Fee Rate</div><div className="fc-value">{symbolFeePercent.toFixed(3)}%</div></div>
+                        <div><div className="fc-label">Break-even Spread</div><div className="fc-value">{(symbolFeePercent * 2).toFixed(3)}%</div></div>
+                        <div><div className="fc-label">Fees as % of P&L</div>
                           <div className="fc-value fee-highlight">
-                            {pnl.totalPnl !== 0
-                              ? Math.abs((symbolFees / (Math.abs(pnl.totalPnl) + symbolFees)) * 100).toFixed(1) + '%'
-                              : '—'}
+                            {pnl.totalPnl !== 0 ? Math.abs((symbolFees / (Math.abs(pnl.totalPnl) + symbolFees)) * 100).toFixed(1) + '%' : '—'}
                           </div>
                         </div>
                       </div>
                     </div>
 
-                    {/* Market Context */}
                     <div className="market-context">
                       <span>24h High: {formatUSD(sym.ticker?.highPrice)}</span>
                       <span>24h Low: {formatUSD(sym.ticker?.lowPrice)}</span>
@@ -397,11 +546,10 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Footer */}
       <footer className="footer">
         <span>Last updated: {lastRefresh?.toLocaleTimeString() || '—'}</span>
         <span>Auto-refresh: {countdown}s</span>
-        <span className="live-dot-small" /> Connected to Binance
+        <span className="live-dot-small" /> Connected via Dubai
       </footer>
     </div>
   );
