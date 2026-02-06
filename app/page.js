@@ -401,7 +401,7 @@ export default function Dashboard() {
                             <span>Status</span><span>Entry</span><span>Exit</span><span>Qty</span>
                             <span>Gross</span><span>Fees</span><span>Net P&L</span><span>ROI</span><span>Duration</span>
                           </div>
-                          {pnl.rounds.map((r, i) => (
+                          {[...pnl.rounds].reverse().map((r, i) => (
                             <div key={i} className={`rrow ${r.type} ${r.netPnl >= 0 ? 'rg' : 'rr'}`}>
                               <span><Badge type={r.type}>{r.type === 'closed' ? '✅ Closed' : '🔓 Open'}</Badge></span>
                               <span>{fmt.usd(r.buyPrice)}</span>
@@ -426,7 +426,7 @@ export default function Dashboard() {
                           <span>Time</span><span>Side</span><span>Price</span><span>Qty</span>
                           <span>Total</span><span>Fee</span><span>Type</span>
                         </div>
-                        {filteredTrades.map((t) => (
+                        {[...filteredTrades].reverse().map((t) => (
                           <div key={t.id} className={`lrow ${t.side === 'BUY' ? 'lbuy' : 'lsell'}`}>
                             <span>{fmt.time(t.time)}</span>
                             <span><Badge type={t.side.toLowerCase()}>{t.side}</Badge></span>
