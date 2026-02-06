@@ -1,377 +1,315 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
-// ⚠️ SAFETY RULE: NEVER EXECUTE WITHOUT CONFIRMATION
-const REQUIRE_CONFIRMATION = true;
+function formatUSD(n) {
+  if (n == null || isNaN(n)) return '$0.00';
+  const abs = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  if (abs >= 1000) return sign + '$' + abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (abs >= 1) return sign + '$' + abs.toFixed(2);
+  return sign + '$' + abs.toFixed(4);
+}
+
+function formatQty(n) {
+  if (n >= 1) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+
+function formatDuration(ms) {
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
+  if (ms < 3600000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+  return `${Math.floor(ms / 3600000)}h ${Math.floor((ms % 3600000) / 60000)}m`;
+}
+
+function PnlBadge({ value, size = 'normal' }) {
+  const isPositive = value >= 0;
+  const cls = `pnl-badge ${isPositive ? 'positive' : 'negative'} ${size}`;
+  return (
+    <span className={cls}>
+      {isPositive ? '▲' : '▼'} {formatUSD(value)}
+    </span>
+  );
+}
+
+function PnlPercent({ value }) {
+  const isPositive = value >= 0;
+  return (
+    <span className={`pnl-pct ${isPositive ? 'positive' : 'negative'}`}>
+      {isPositive ? '+' : ''}{value.toFixed(2)}%
+    </span>
+  );
+}
 
 export default function Dashboard() {
+  const [data, setData] = useState(null);
   const [portfolio, setPortfolio] = useState(null);
-  const [opportunities, setOpportunities] = useState([]);
-  const [catalysts, setCatalysts] = useState([]);
-  const [analysis, setAnalysis] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [analysisLoading, setAnalysisLoading] = useState(false);
-  const [showModal, setShowModal] = useState(false);
-  const [pendingTrade, setPendingTrade] = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(null);
+  const [error, setError] = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const [countdown, setCountdown] = useState(30);
+  const [expandedSymbol, setExpandedSymbol] = useState(null);
+  const timerRef = useRef(null);
 
-  // Fetch portfolio data
-  useEffect(() => {
-    fetchPortfolio();
-    fetchCatalysts();
-    fetchOpportunities();
-  }, []);
-
-  const fetchPortfolio = async () => {
+  const fetchAll = useCallback(async () => {
     try {
-      const res = await fetch('/api/portfolio');
-      const data = await res.json();
-      setPortfolio(data);
-      setLastUpdated(new Date());
-      setLoading(false);
+      const [tradesRes, portfolioRes] = await Promise.all([
+        fetch('/api/trades', { cache: 'no-store' }),
+        fetch('/api/portfolio', { cache: 'no-store' }),
+      ]);
+
+      if (!tradesRes.ok) throw new Error(`Trades API: ${tradesRes.status}`);
+      const tradesData = await tradesRes.json();
+      setData(tradesData);
+
+      if (portfolioRes.ok) {
+        const pData = await portfolioRes.json();
+        setPortfolio(pData);
+      }
+
+      setLastRefresh(new Date());
+      setCountdown(30);
+      setError(null);
     } catch (err) {
-      console.error('Portfolio fetch error:', err);
+      setError(err.message);
+    } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const fetchCatalysts = async () => {
-    // Hardcoded catalysts for now - will be API driven
-    setCatalysts([
-      { date: '2026-02-10', day: '10', month: 'FEB', asset: 'BTC', title: 'ETF Options Expiry', description: 'Large options expiry could trigger volatility', impact: 'high' },
-      { date: '2026-02-12', day: '12', month: 'FEB', asset: 'SOL', title: 'Firedancer Testnet Update', description: 'Jump Crypto validator client milestone', impact: 'high' },
-      { date: '2026-02-15', day: '15', month: 'FEB', asset: 'TAO', title: 'Subnet 32 Launch', description: 'New AI training subnet going live', impact: 'high' },
-      { date: '2026-02-18', day: '18', month: 'FEB', asset: 'RNDR', title: 'Apple Vision Pro Integration', description: 'Rumored partnership announcement', impact: 'medium' },
-      { date: '2026-02-20', day: '20', month: 'FEB', asset: 'INJ', title: 'Token Burn Event', description: 'Quarterly deflationary burn', impact: 'medium' },
-    ]);
-  };
+  // Initial load + polling
+  useEffect(() => {
+    fetchAll();
+    const interval = setInterval(fetchAll, 30000);
+    return () => clearInterval(interval);
+  }, [fetchAll]);
 
-  const fetchOpportunities = async () => {
-    // High-conviction plays based on catalysts
-    setOpportunities([
-      { 
-        symbol: 'TAO', 
-        name: 'Bittensor', 
-        price: '$485.00', 
-        catalyst: '🔥 AI narrative leader + subnet growth',
-        reason: 'Decentralized AI is THE narrative. Subnet launches accelerating. Low float, high demand.',
-        signal: 'buy',
-        confidence: 92
-      },
-      { 
-        symbol: 'RNDR', 
-        name: 'Render Network', 
-        price: '$8.45', 
-        catalyst: '🍎 Apple Vision Pro + GPU demand',
-        reason: 'GPU compute demand exploding. Apple integration rumors. Already has Stable Diffusion integration.',
-        signal: 'buy',
-        confidence: 88
-      },
-      { 
-        symbol: 'SOL', 
-        name: 'Solana', 
-        price: '$142.00', 
-        catalyst: '⚡ Firedancer launch imminent',
-        reason: 'Second validator client = network resilience. Meme coin activity staying strong.',
-        signal: 'buy',
-        confidence: 85
-      },
-      { 
-        symbol: 'INJ', 
-        name: 'Injective', 
-        price: '$24.50', 
-        catalyst: '🔥 Deflationary burns + AI integration',
-        reason: 'Burning 60% of fees. AI agent framework launching. DeFi narrative picking up.',
-        signal: 'buy',
-        confidence: 82
-      },
-      { 
-        symbol: 'FET', 
-        name: 'Fetch.ai (ASI)', 
-        price: '$1.85', 
-        catalyst: '🤖 ASI Alliance merger complete',
-        reason: 'Merged with AGIX + OCEAN. Largest AI crypto alliance. Autonomous agent focus.',
-        signal: 'buy',
-        confidence: 80
-      },
-    ]);
-  };
-
-  const runAnalysis = async () => {
-    setAnalysisLoading(true);
-    // This would call Gemini CLI or another AI for analysis
-    // For now, showing structured analysis
-    setTimeout(() => {
-      setAnalysis([
-        {
-          asset: 'BTC',
-          signal: 'hold',
-          summary: 'Strong foundation, but limited upside catalysts near-term.',
-          details: 'BTC at $75K has priced in most bullish catalysts (ETF approval, halving). Next leg requires macro shift or corporate adoption wave. HOLD as base position, don\'t chase.',
-          action: 'Keep 30-40% allocation. Take profits on spikes above $80K.'
-        },
-        {
-          asset: 'TAO',
-          signal: 'buy',
-          summary: 'TOP PICK - AI narrative + technical breakout imminent.',
-          details: 'Bittensor is THE decentralized AI play. Subnet growth accelerating (32 subnets now). Low circulating supply. Major exchange listings rumored. This is a 10x candidate.',
-          action: 'AGGRESSIVE BUY. Target 10-15% of portfolio.'
-        },
-        {
-          asset: 'SOL',
-          signal: 'buy',
-          summary: 'Firedancer catalyst + ecosystem strength.',
-          details: 'Solana ecosystem is thriving. Firedancer (Jump Crypto\'s validator) launches Q1 2026. Meme coin activity = fees. DePIN projects building here.',
-          action: 'BUY on dips below $140. Strong conviction.'
-        },
-        {
-          asset: 'RNDR',
-          signal: 'buy',
-          summary: 'GPU compute demand + Apple rumors = explosive potential.',
-          details: 'Render Network powers GPU-intensive tasks (AI, 3D, video). Apple Vision Pro integration rumors are credible. Already integrated with Stable Diffusion.',
-          action: 'BUY. High-conviction AI infrastructure play.'
-        },
-      ]);
-      setAnalysisLoading(false);
-    }, 2000);
-  };
-
-  // Trade confirmation modal
-  const initiateTrade = (type, asset, amount) => {
-    if (!REQUIRE_CONFIRMATION) return; // Safety check
-    setPendingTrade({ type, asset, amount, price: portfolio?.prices?.[asset] || 'N/A' });
-    setShowModal(true);
-  };
-
-  const confirmTrade = async () => {
-    // ⚠️ THIS IS WHERE WE WOULD EXECUTE - BUT ONLY AFTER CONFIRMATION
-    console.log('Trade confirmed by user:', pendingTrade);
-    alert(`Trade would execute: ${pendingTrade.type} ${pendingTrade.amount} ${pendingTrade.asset}\n\n⚠️ DEMO MODE - No actual trade executed.\n\nIn production, this sends to Telegram for final confirmation.`);
-    setShowModal(false);
-    setPendingTrade(null);
-  };
+  // Countdown timer
+  useEffect(() => {
+    timerRef.current = setInterval(() => {
+      setCountdown(c => (c <= 1 ? 30 : c - 1));
+    }, 1000);
+    return () => clearInterval(timerRef.current);
+  }, []);
 
   if (loading) {
     return (
       <div className="dashboard">
-        <div className="loading">
-          <div className="spinner"></div>
+        <div className="loading-screen">
+          <div className="spinner-large" />
+          <p>Connecting to Binance...</p>
         </div>
       </div>
     );
   }
 
+  const summary = data?.summary || {};
+  const symbols = data?.symbols || [];
+  const hasTradestoday = symbols.length > 0;
+
   return (
     <div className="dashboard">
       {/* Header */}
       <header className="header">
-        <h1>🚀 CRYPTO GOD DASHBOARD</h1>
-        <div className="header-stats">
-          <div className="total-value">
-            <div className="label">Portfolio Value</div>
-            <div className="amount">${portfolio?.totalValue?.toLocaleString() || '3,448'}</div>
-            <div className={`change ${portfolio?.change24h >= 0 ? 'positive' : 'negative'}`}>
-              {portfolio?.change24h >= 0 ? '▲' : '▼'} {Math.abs(portfolio?.change24h || 2.4).toFixed(2)}% (24h)
-            </div>
+        <div className="header-left">
+          <h1>⚡ TRADE TRACKER</h1>
+          <span className="header-date">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</span>
+        </div>
+        <div className="header-right">
+          <div className="live-indicator">
+            <span className="live-dot" />
+            LIVE
+          </div>
+          <div className="refresh-info">
+            <span className="countdown">{countdown}s</span>
+            <button className="btn-refresh" onClick={fetchAll}>↻ Refresh</button>
           </div>
         </div>
       </header>
 
-      {/* Main Grid */}
-      <div className="grid">
-        {/* Holdings Card */}
-        <div className="card">
-          <div className="card-header">
-            <h2>💰 Holdings</h2>
-            <button className="refresh-btn" onClick={fetchPortfolio}>Refresh</button>
-          </div>
-          <div className="holdings-table">
-            <div className="holdings-row header">
-              <span>Asset</span>
-              <span>Balance</span>
-              <span>Value</span>
-              <span>24h</span>
-              <span>Signal</span>
-            </div>
-            <div className="holdings-row">
-              <div className="asset-info">
-                <div className="asset-icon" style={{background: '#F7931A'}}>₿</div>
-                <div>
-                  <div className="asset-name">Bitcoin</div>
-                  <div className="asset-symbol">BTC</div>
-                </div>
-              </div>
-              <span>0.0455</span>
-              <span>$3,447</span>
-              <span className="price-change positive">+2.4%</span>
-              <span className="signal hold">🟡 HOLD</span>
-            </div>
-            <div className="holdings-row">
-              <div className="asset-info">
-                <div className="asset-icon" style={{background: '#26A17B'}}>₮</div>
-                <div>
-                  <div className="asset-name">Tether</div>
-                  <div className="asset-symbol">USDT</div>
-                </div>
-              </div>
-              <span>0.57</span>
-              <span>$0.57</span>
-              <span className="price-change">0.0%</span>
-              <span className="signal hold">— CASH</span>
-            </div>
-          </div>
-          <div style={{marginTop: '1.5rem', padding: '1rem', background: 'var(--bg-secondary)', borderRadius: '12px', textAlign: 'center'}}>
-            <p style={{color: 'var(--text-secondary)', marginBottom: '0.75rem', fontSize: '0.9rem'}}>
-              💡 Your portfolio is 99% BTC. Consider diversifying into high-catalyst plays below.
-            </p>
-            <button className="trade-btn" onClick={() => initiateTrade('BUY', 'TAO', '0.1 BTC worth')}>
-              Start Diversifying →
-            </button>
-          </div>
-        </div>
-
-        {/* Catalyst Calendar */}
-        <div className="card">
-          <div className="card-header">
-            <h2>📅 Catalyst Calendar</h2>
-            <span style={{color: 'var(--text-secondary)', fontSize: '0.875rem'}}>Next 30 days</span>
-          </div>
-          <div className="catalyst-list">
-            {catalysts.map((c, i) => (
-              <div key={i} className="catalyst-item">
-                <div className="catalyst-date">
-                  <div className="day">{c.day}</div>
-                  <div className="month">{c.month}</div>
-                </div>
-                <div className="catalyst-content">
-                  <h4>{c.asset} — {c.title}</h4>
-                  <p>{c.description}</p>
-                </div>
-                <div className={`catalyst-impact ${c.impact}`}>
-                  {c.impact === 'high' ? '🔥 HIGH' : c.impact === 'medium' ? '⚡ MED' : '📊 LOW'}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* AI Analysis Section */}
-        <div className="card grid-full">
-          <div className="card-header">
-            <h2>🧠 AI Analysis Engine</h2>
-            <button 
-              className="refresh-btn" 
-              onClick={runAnalysis}
-              disabled={analysisLoading}
-            >
-              {analysisLoading ? 'Analyzing...' : '🔄 Run GOD MODE Analysis'}
-            </button>
-          </div>
-          {analysisLoading ? (
-            <div className="loading">
-              <div className="spinner"></div>
-            </div>
-          ) : analysis.length > 0 ? (
-            <div>
-              {analysis.map((a, i) => (
-                <div key={i} className="analysis-item" style={{borderLeftColor: a.signal === 'buy' ? 'var(--green)' : a.signal === 'sell' ? 'var(--red)' : 'var(--yellow)'}}>
-                  <div className="analysis-header">
-                    <h4>
-                      <span style={{fontSize: '1.25rem'}}>{a.asset}</span>
-                      <span className={`signal ${a.signal}`}>
-                        {a.signal === 'buy' ? '🟢 BUY' : a.signal === 'sell' ? '🔴 SELL' : '🟡 HOLD'}
-                      </span>
-                    </h4>
-                    {a.signal === 'buy' && (
-                      <button className="trade-btn" onClick={() => initiateTrade('BUY', a.asset, '$500')}>
-                        Buy {a.asset}
-                      </button>
-                    )}
-                  </div>
-                  <div className="analysis-body">
-                    <p><strong>{a.summary}</strong></p>
-                    <p style={{margin: '0.75rem 0'}}>{a.details}</p>
-                    <p style={{color: 'var(--accent)'}}>→ {a.action}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div style={{textAlign: 'center', padding: '3rem', color: 'var(--text-secondary)'}}>
-              <p style={{fontSize: '3rem', marginBottom: '1rem'}}>🧠</p>
-              <p>Click "Run GOD MODE Analysis" to generate deep research on your portfolio and opportunities.</p>
-            </div>
-          )}
-        </div>
-
-        {/* Opportunity Scanner */}
-        <div className="card grid-full">
-          <div className="card-header">
-            <h2>🔥 Opportunity Scanner — AGGRESSIVE PLAYS</h2>
-            <span style={{color: 'var(--accent)', fontSize: '0.875rem'}}>High-conviction catalyst plays</span>
-          </div>
-          <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1rem'}}>
-            {opportunities.map((opp, i) => (
-              <div key={i} className="opportunity-card">
-                <div className="opportunity-header">
-                  <h4>
-                    <span style={{color: 'var(--accent)'}}>{opp.symbol}</span> — {opp.name}
-                  </h4>
-                  <span className="opportunity-price">{opp.price}</span>
-                </div>
-                <p className="opportunity-catalyst">{opp.catalyst}</p>
-                <p className="opportunity-reason">{opp.reason}</p>
-                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem'}}>
-                  <span style={{color: 'var(--green)', fontSize: '0.875rem'}}>
-                    Confidence: {opp.confidence}%
-                  </span>
-                  <button className="trade-btn" onClick={() => initiateTrade('BUY', opp.symbol, '$500')}>
-                    Buy {opp.symbol}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Last Updated */}
-      <div className="last-updated">
-        Last updated: {lastUpdated?.toLocaleString() || 'Never'} • 
-        <span style={{color: 'var(--accent)', marginLeft: '0.5rem'}}>
-          ⚠️ All trades require your confirmation
-        </span>
-      </div>
-
-      {/* Confirmation Modal */}
-      {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <h3>⚠️ CONFIRM TRADE</h3>
-            <div className="modal-warning">
-              🔒 No trade will execute without your explicit confirmation.
-              <br />This is a safety feature that cannot be bypassed.
-            </div>
-            <div className="modal-details">
-              <p><span>Action:</span> <strong>{pendingTrade?.type}</strong></p>
-              <p><span>Asset:</span> <strong>{pendingTrade?.asset}</strong></p>
-              <p><span>Amount:</span> <strong>{pendingTrade?.amount}</strong></p>
-              <p><span>Current Price:</span> <strong>{pendingTrade?.price}</strong></p>
-            </div>
-            <p style={{color: 'var(--text-secondary)', fontSize: '0.875rem'}}>
-              Clicking confirm will send this order to Telegram for final approval.
-            </p>
-            <div className="modal-actions">
-              <button className="cancel-btn" onClick={() => setShowModal(false)}>
-                Cancel
-              </button>
-              <button className="confirm-btn" onClick={confirmTrade}>
-                ✓ Confirm & Send to Telegram
-              </button>
-            </div>
-          </div>
+      {error && (
+        <div className="error-banner">
+          ⚠️ {error} — <button onClick={fetchAll}>Retry</button>
         </div>
       )}
+
+      {/* Daily Summary Cards */}
+      <div className="summary-grid">
+        <div className={`summary-card ${summary.totalPnl >= 0 ? 'card-green' : 'card-red'}`}>
+          <div className="summary-label">Daily P&L</div>
+          <div className="summary-value">
+            <PnlBadge value={summary.totalPnl || 0} size="large" />
+          </div>
+          <div className="summary-sub">
+            Realized: {formatUSD(summary.realizedPnl || 0)} · Unrealized: {formatUSD(summary.unrealizedPnl || 0)}
+          </div>
+        </div>
+
+        <div className="summary-card">
+          <div className="summary-label">Total Trades</div>
+          <div className="summary-value count">{summary.totalTrades || 0}</div>
+          <div className="summary-sub">Across {symbols.length} pair{symbols.length !== 1 ? 's' : ''}</div>
+        </div>
+
+        <div className="summary-card">
+          <div className="summary-label">Volume</div>
+          <div className="summary-value volume">{formatUSD(summary.totalVolume || 0)}</div>
+          <div className="summary-sub">Total traded today</div>
+        </div>
+
+        <div className="summary-card">
+          <div className="summary-label">Fees Paid</div>
+          <div className="summary-value fees">{formatUSD(summary.totalFees || 0)}</div>
+          <div className="summary-sub">Net after fees: {formatUSD(summary.netPnl || 0)}</div>
+        </div>
+
+        {portfolio && (
+          <div className="summary-card">
+            <div className="summary-label">Portfolio Value</div>
+            <div className="summary-value portfolio">{formatUSD(portfolio.totalValue || 0)}</div>
+            <div className="summary-sub">{portfolio.holdings?.length || 0} assets</div>
+          </div>
+        )}
+      </div>
+
+      {/* Per-Symbol Breakdown */}
+      {hasTradestoday ? (
+        <div className="trades-section">
+          <h2 className="section-title">📊 Trades by Asset</h2>
+
+          {symbols.map((sym) => {
+            const isExpanded = expandedSymbol === sym.symbol;
+            const pnl = sym.pnl || {};
+            const isProfitable = pnl.totalPnl >= 0;
+
+            return (
+              <div key={sym.symbol} className={`symbol-card ${isProfitable ? 'profitable' : 'losing'}`}>
+                {/* Symbol Header — clickable */}
+                <div
+                  className="symbol-header"
+                  onClick={() => setExpandedSymbol(isExpanded ? null : sym.symbol)}
+                >
+                  <div className="symbol-left">
+                    <span className="symbol-name">{sym.asset}</span>
+                    <span className="symbol-price">{formatUSD(sym.currentPrice)}</span>
+                    <PnlPercent value={sym.ticker?.priceChangePercent || 0} />
+                  </div>
+                  <div className="symbol-right">
+                    <div className="symbol-stats">
+                      <span className="stat">
+                        <span className="stat-label">Trades</span>
+                        <span className="stat-value">{sym.trades.length}</span>
+                      </span>
+                      <span className="stat">
+                        <span className="stat-label">Realized</span>
+                        <PnlBadge value={pnl.totalRealizedPnl || 0} />
+                      </span>
+                      <span className="stat">
+                        <span className="stat-label">Unrealized</span>
+                        <PnlBadge value={pnl.totalUnrealizedPnl || 0} />
+                      </span>
+                      <span className="stat total">
+                        <span className="stat-label">Total P&L</span>
+                        <PnlBadge value={pnl.totalPnl || 0} />
+                      </span>
+                    </div>
+                    <span className={`expand-arrow ${isExpanded ? 'open' : ''}`}>▾</span>
+                  </div>
+                </div>
+
+                {/* Expanded: Trade Details */}
+                {isExpanded && (
+                  <div className="symbol-details">
+                    {/* Round trips */}
+                    {pnl.rounds?.length > 0 && (
+                      <div className="rounds-section">
+                        <h4>Round Trips</h4>
+                        <div className="rounds-table">
+                          <div className="rounds-header">
+                            <span>Type</span>
+                            <span>Buy Price</span>
+                            <span>Sell Price</span>
+                            <span>Qty</span>
+                            <span>Gross P&L</span>
+                            <span>Fees</span>
+                            <span>Net P&L</span>
+                            <span>%</span>
+                            <span>Hold Time</span>
+                          </div>
+                          {pnl.rounds.map((r, i) => (
+                            <div key={i} className={`rounds-row ${r.type} ${r.netPnl >= 0 ? 'row-green' : 'row-red'}`}>
+                              <span className={`round-type ${r.type}`}>
+                                {r.type === 'closed' ? '✅ Closed' : '🔓 Open'}
+                              </span>
+                              <span>{formatUSD(r.buyPrice)}</span>
+                              <span>{r.sellPrice ? formatUSD(r.sellPrice) : `→ ${formatUSD(r.currentPrice)}`}</span>
+                              <span>{formatQty(r.qty)}</span>
+                              <span><PnlBadge value={r.grossPnl} /></span>
+                              <span className="fee-val">{formatUSD(r.fees)}</span>
+                              <span><PnlBadge value={r.netPnl} /></span>
+                              <span><PnlPercent value={r.pnlPercent} /></span>
+                              <span className="hold-time">{formatDuration(r.holdTimeMs)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Raw trade log */}
+                    <div className="trades-log">
+                      <h4>Trade Log</h4>
+                      <div className="log-table">
+                        <div className="log-header">
+                          <span>Time</span>
+                          <span>Side</span>
+                          <span>Price</span>
+                          <span>Qty</span>
+                          <span>Total</span>
+                          <span>Fee</span>
+                        </div>
+                        {sym.trades.map((t) => (
+                          <div key={t.id} className={`log-row ${t.side === 'BUY' ? 'buy-row' : 'sell-row'}`}>
+                            <span>{formatTime(t.time)}</span>
+                            <span className={`side-badge ${t.side.toLowerCase()}`}>{t.side}</span>
+                            <span>{formatUSD(t.price)}</span>
+                            <span>{formatQty(t.qty)}</span>
+                            <span>{formatUSD(t.quoteQty)}</span>
+                            <span className="fee-val">{t.commission.toFixed(6)} {t.commissionAsset}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 24h market context */}
+                    <div className="market-context">
+                      <span>24h High: {formatUSD(sym.ticker?.highPrice)}</span>
+                      <span>24h Low: {formatUSD(sym.ticker?.lowPrice)}</span>
+                      <span>24h Vol: {formatUSD(sym.ticker?.quoteVolume)}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state">
+          <div className="empty-icon">📭</div>
+          <h3>No trades today yet</h3>
+          <p>Your trades will appear here in real-time as they execute on Binance.</p>
+          <p className="empty-time">Market opens fresh at 00:00 UTC</p>
+        </div>
+      )}
+
+      {/* Footer */}
+      <footer className="footer">
+        <span>Last updated: {lastRefresh?.toLocaleTimeString() || '—'}</span>
+        <span>Auto-refresh: {countdown}s</span>
+        <span className="live-dot-small" /> Connected to Binance
+      </footer>
     </div>
   );
 }
