@@ -4,7 +4,6 @@ import crypto from 'crypto';
 const API_KEY = process.env.BINANCE_API_KEY;
 const SECRET = process.env.BINANCE_SECRET;
 
-// All symbols Jason trades
 const TRACKED_SYMBOLS = [
   'BTCUSDT', 'TAOUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT',
   'ICPUSDT', 'FILUSDT', 'FETUSDT', 'ONDOUSDT', 'JUPUSDT',
@@ -13,58 +12,39 @@ const TRACKED_SYMBOLS = [
 ];
 
 function generateSignature(queryString) {
-  return crypto
-    .createHmac('sha256', SECRET)
-    .update(queryString)
-    .digest('hex');
+  return crypto.createHmac('sha256', SECRET).update(queryString).digest('hex');
 }
 
-// Get start of today in UTC ms
 function getTodayStartUTC() {
   const now = new Date();
   now.setUTCHours(0, 0, 0, 0);
   return now.getTime();
 }
 
-// Fetch trades for a single symbol
 async function fetchSymbolTrades(symbol, startTime, timestamp) {
   const query = `symbol=${symbol}&startTime=${startTime}&timestamp=${timestamp}`;
   const signature = generateSignature(query);
-
   try {
     const res = await fetch(
       `https://api.binance.com/api/v3/myTrades?${query}&signature=${signature}`,
       { headers: { 'X-MBX-APIKEY': API_KEY }, cache: 'no-store' }
     );
     const data = await res.json();
-    if (Array.isArray(data)) return data;
-    return [];
-  } catch {
-    return [];
-  }
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
 }
 
-// Fetch current price for a symbol
 async function fetchCurrentPrice(symbol) {
   try {
-    const res = await fetch(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
-      { cache: 'no-store' }
-    );
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`, { cache: 'no-store' });
     const data = await res.json();
     return parseFloat(data.price) || 0;
-  } catch {
-    return 0;
-  }
+  } catch { return 0; }
 }
 
-// Fetch 24h ticker for change %
 async function fetch24hTicker(symbol) {
   try {
-    const res = await fetch(
-      `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
-      { cache: 'no-store' }
-    );
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`, { cache: 'no-store' });
     const data = await res.json();
     return {
       priceChangePercent: parseFloat(data.priceChangePercent) || 0,
@@ -78,7 +58,18 @@ async function fetch24hTicker(symbol) {
   }
 }
 
-// Match trades into rounds (buy then sell = 1 round trip)
+// Convert any commission to USDT value
+function commissionToUSDT(commission, commissionAsset, assetPrice, currentPrice) {
+  if (commissionAsset === 'USDT') return commission;
+  if (commissionAsset === 'BNB') {
+    // BNB fee discount case — use a rough BNB price or fetch separately
+    // For now approximate using the trade's implied conversion
+    return commission * 600; // Rough BNB price — will be replaced with live
+  }
+  // Commission in the traded asset (e.g. BTC) — use current price for accuracy
+  return commission * currentPrice;
+}
+
 function calculatePnL(trades, currentPrice) {
   const buys = [];
   const sells = [];
@@ -94,7 +85,16 @@ function calculatePnL(trades, currentPrice) {
       commissionAsset: t.commissionAsset,
       time: t.time,
       isBuyer: t.isBuyer,
+      // Fee in USDT for this individual trade
+      feeUSDT: commissionToUSDT(
+        parseFloat(t.commission),
+        t.commissionAsset,
+        parseFloat(t.price),
+        currentPrice
+      ),
     };
+    // Fee as % of trade value
+    entry.feePercent = (entry.feeUSDT / entry.quoteQty) * 100;
     if (t.isBuyer) buys.push(entry);
     else sells.push(entry);
   });
@@ -104,11 +104,10 @@ function calculatePnL(trades, currentPrice) {
   let totalUnrealizedPnl = 0;
   let totalFees = 0;
 
-  // Sort by time
   buys.sort((a, b) => a.time - b.time);
   sells.sort((a, b) => a.time - b.time);
 
-  // Match sells to buys (FIFO)
+  // FIFO matching
   const unmatchedBuys = [...buys];
   sells.forEach(sell => {
     let remainingSellQty = sell.qty;
@@ -116,29 +115,31 @@ function calculatePnL(trades, currentPrice) {
     while (remainingSellQty > 0.000001 && unmatchedBuys.length > 0) {
       const buy = unmatchedBuys[0];
       const matchQty = Math.min(remainingSellQty, buy.qty);
-      const pnl = (sell.price - buy.price) * matchQty;
+      const grossPnl = (sell.price - buy.price) * matchQty;
       const pnlPercent = ((sell.price - buy.price) / buy.price) * 100;
 
-      // Estimate fees in USDT
-      let buyFee = buy.commissionAsset === 'USDT'
-        ? buy.commission * (matchQty / buy.qty)
-        : buy.commission * (matchQty / buy.qty) * buy.price;
-      let sellFee = sell.commissionAsset === 'USDT'
-        ? sell.commission * (matchQty / sell.qty)
-        : sell.commission * (matchQty / sell.qty) * sell.price;
+      // Pro-rate fees based on matched qty
+      const buyFee = buy.feeUSDT * (matchQty / (buy.qty + (buy._matchedQty || 0) > buy.qty ? buy.qty : buy.qty));
+      const sellFee = sell.feeUSDT * (matchQty / sell.qty);
+      const totalRoundFee = buyFee + sellFee;
+      const netPnl = grossPnl - totalRoundFee;
+      const netPnlPercent = (netPnl / (buy.price * matchQty)) * 100;
 
-      const netPnl = pnl - buyFee - sellFee;
-      totalFees += buyFee + sellFee;
+      totalFees += totalRoundFee;
 
       rounds.push({
         type: 'closed',
         buyPrice: buy.price,
         sellPrice: sell.price,
         qty: matchQty,
-        grossPnl: pnl,
-        fees: buyFee + sellFee,
+        grossPnl,
+        buyFee,
+        sellFee,
+        totalFee: totalRoundFee,
+        feePercent: (totalRoundFee / (buy.price * matchQty)) * 100,
         netPnl,
         pnlPercent,
+        netPnlPercent,
         buyTime: buy.time,
         sellTime: sell.time,
         holdTimeMs: sell.time - buy.time,
@@ -147,16 +148,20 @@ function calculatePnL(trades, currentPrice) {
       totalRealizedPnl += netPnl;
       remainingSellQty -= matchQty;
       buy.qty -= matchQty;
-
       if (buy.qty < 0.000001) unmatchedBuys.shift();
     }
   });
 
-  // Remaining open buys → unrealized P&L
+  // Open positions
   unmatchedBuys.forEach(buy => {
     if (buy.qty > 0.000001) {
-      const unrealizedPnl = (currentPrice - buy.price) * buy.qty;
+      const grossPnl = (currentPrice - buy.price) * buy.qty;
       const pnlPercent = ((currentPrice - buy.price) / buy.price) * 100;
+      const entryFee = buy.feeUSDT * (buy.qty / (buy.qty)); // remaining portion
+      const netPnl = grossPnl - entryFee;
+      const netPnlPercent = (netPnl / (buy.price * buy.qty)) * 100;
+
+      totalFees += entryFee;
 
       rounds.push({
         type: 'open',
@@ -164,18 +169,25 @@ function calculatePnL(trades, currentPrice) {
         sellPrice: null,
         currentPrice,
         qty: buy.qty,
-        grossPnl: unrealizedPnl,
-        fees: 0,
-        netPnl: unrealizedPnl,
+        grossPnl,
+        buyFee: entryFee,
+        sellFee: 0,
+        totalFee: entryFee,
+        feePercent: (entryFee / (buy.price * buy.qty)) * 100,
+        netPnl,
         pnlPercent,
+        netPnlPercent,
         buyTime: buy.time,
         sellTime: null,
         holdTimeMs: Date.now() - buy.time,
       });
 
-      totalUnrealizedPnl += unrealizedPnl;
+      totalUnrealizedPnl += netPnl;
     }
   });
+
+  // Build per-trade fee details for the trade log
+  const allTrades = [...buys, ...sells].sort((a, b) => a.time - b.time);
 
   return {
     rounds,
@@ -193,20 +205,21 @@ export async function GET() {
     const timestamp = Date.now();
     const todayStart = getTodayStartUTC();
 
-    // Fetch trades for all symbols in parallel
     const tradePromises = TRACKED_SYMBOLS.map(sym =>
-      fetchSymbolTrades(sym, todayStart, timestamp).then(trades => ({
-        symbol: sym,
-        trades,
-      }))
+      fetchSymbolTrades(sym, todayStart, timestamp).then(trades => ({ symbol: sym, trades }))
     );
 
     const allResults = await Promise.all(tradePromises);
-
-    // Filter to symbols that have trades today
     const activeSymbols = allResults.filter(r => r.trades.length > 0);
 
-    // Fetch current prices + 24h data for active symbols
+    // Also fetch BNB price for fee conversion
+    let bnbPrice = 600;
+    try {
+      const bnbRes = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', { cache: 'no-store' });
+      const bnbData = await bnbRes.json();
+      bnbPrice = parseFloat(bnbData.price) || 600;
+    } catch {}
+
     const enriched = await Promise.all(
       activeSymbols.map(async ({ symbol, trades }) => {
         const [currentPrice, ticker] = await Promise.all([
@@ -217,27 +230,47 @@ export async function GET() {
         const asset = symbol.replace('USDT', '');
         const pnl = calculatePnL(trades, currentPrice);
 
+        // Build enriched trade log with per-trade fees in USDT
+        const tradeLog = trades.map(t => {
+          const commission = parseFloat(t.commission);
+          const commAsset = t.commissionAsset;
+          const price = parseFloat(t.price);
+          const qty = parseFloat(t.qty);
+          const quoteQty = parseFloat(t.quoteQty);
+
+          let feeUSDT;
+          if (commAsset === 'USDT') feeUSDT = commission;
+          else if (commAsset === 'BNB') feeUSDT = commission * bnbPrice;
+          else feeUSDT = commission * currentPrice;
+
+          const feePercent = (feeUSDT / quoteQty) * 100;
+
+          return {
+            id: t.id,
+            price,
+            qty,
+            quoteQty,
+            side: t.isBuyer ? 'BUY' : 'SELL',
+            time: t.time,
+            commission,
+            commissionAsset: commAsset,
+            feeUSDT,
+            feePercent,
+            isMaker: t.isMaker,
+          };
+        });
+
         return {
           symbol,
           asset,
           currentPrice,
           ticker,
-          trades: trades.map(t => ({
-            id: t.id,
-            price: parseFloat(t.price),
-            qty: parseFloat(t.qty),
-            quoteQty: parseFloat(t.quoteQty),
-            side: t.isBuyer ? 'BUY' : 'SELL',
-            time: t.time,
-            commission: parseFloat(t.commission),
-            commissionAsset: t.commissionAsset,
-          })),
+          trades: tradeLog,
           pnl,
         };
       })
     );
 
-    // Calculate daily totals
     let dailyRealizedPnl = 0;
     let dailyUnrealizedPnl = 0;
     let dailyFees = 0;
@@ -263,7 +296,8 @@ export async function GET() {
         unrealizedPnl: dailyUnrealizedPnl,
         totalPnl: dailyRealizedPnl + dailyUnrealizedPnl,
         totalFees: dailyFees,
-        netPnl: dailyRealizedPnl + dailyUnrealizedPnl - dailyFees,
+        netPnl: dailyRealizedPnl + dailyUnrealizedPnl,
+        feePercent: totalVolume > 0 ? (dailyFees / totalVolume) * 100 : 0,
       },
       lastUpdated: new Date().toISOString(),
     });

@@ -159,53 +159,186 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
   margin-left: 0.5rem;
 }
 
-/* ========== SUMMARY GRID ========== */
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1rem;
-  margin-bottom: 2rem;
-}
-.summary-card {
+/* ========== P&L HERO ========== */
+.pnl-hero {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1.25rem;
+  padding: 1.5rem 2rem;
+  margin-bottom: 1rem;
   transition: all 0.25s;
 }
-.summary-card:hover {
-  border-color: var(--border-accent);
-  transform: translateY(-1px);
+.pnl-hero.hero-green {
+  border-color: rgba(0, 229, 160, 0.25);
+  background: linear-gradient(135deg, var(--bg-card), rgba(0, 229, 160, 0.06));
 }
-.summary-card.card-green {
-  border-color: rgba(0, 229, 160, 0.2);
-  background: linear-gradient(135deg, var(--bg-card), rgba(0, 229, 160, 0.04));
+.pnl-hero.hero-red {
+  border-color: rgba(255, 77, 106, 0.25);
+  background: linear-gradient(135deg, var(--bg-card), rgba(255, 77, 106, 0.06));
 }
-.summary-card.card-red {
-  border-color: rgba(255, 77, 106, 0.2);
-  background: linear-gradient(135deg, var(--bg-card), rgba(255, 77, 106, 0.04));
-}
-.summary-label {
-  font-size: 0.7rem;
+.hero-main { text-align: center; margin-bottom: 1.25rem; }
+.hero-label {
+  font-size: 0.75rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.12em;
   color: var(--text-secondary);
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.4rem;
 }
-.summary-value {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 1.6rem;
-  font-weight: 700;
-  margin-bottom: 0.35rem;
+.hero-value { font-size: 2.2rem; }
+.pnl-badge.hero { font-size: 2.2rem; }
+
+.hero-breakdown {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
 }
-.summary-value.count { color: var(--accent); }
-.summary-value.volume { color: var(--text-primary); }
-.summary-value.fees { color: var(--yellow); }
-.summary-value.portfolio { color: var(--accent); }
-.summary-sub {
+.hero-stat { text-align: center; }
+.hero-stat-label {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+.hero-stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.hero-divider {
+  width: 1px;
+  height: 30px;
+  background: var(--border);
+}
+
+/* ========== STATS ROW ========== */
+.stats-row {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1.75rem;
+  flex-wrap: wrap;
+}
+.stat-pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s;
+}
+.stat-pill:hover { border-color: var(--border-accent); }
+.stat-pill-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.stat-pill-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.stat-pill-value.accent { color: var(--accent); }
+
+/* ========== FEE STYLING ========== */
+.fee-highlight {
+  color: var(--yellow) !important;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+}
+.fee-highlight-sm {
+  color: var(--yellow);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.fee-pct-inline {
   font-size: 0.72rem;
   color: var(--text-muted);
+  margin-left: 0.25rem;
+}
+.fee-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--yellow);
+}
+.fee-badge .fee-pct {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.fee-cell {
+  color: var(--yellow) !important;
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+.fee-cell-total {
+  color: var(--yellow) !important;
+  font-weight: 600;
+  font-size: 0.78rem;
+}
+.fee-stat { opacity: 0.9; }
+
+/* ========== FEE CALLOUT BOX ========== */
+.fee-callout {
+  background: rgba(255, 217, 61, 0.05);
+  border: 1px solid rgba(255, 217, 61, 0.15);
+  border-radius: var(--radius-sm);
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+}
+.fee-callout-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--yellow);
+  margin-bottom: 0.75rem;
+}
+.fee-callout-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+}
+.fc-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+.fc-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ========== MAKER/TAKER BADGE ========== */
+.maker-badge {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.maker-badge.maker {
+  background: rgba(0, 229, 160, 0.1);
+  color: var(--green);
+}
+.maker-badge.taker {
+  background: rgba(255, 77, 106, 0.1);
+  color: var(--red);
 }
 
 /* ========== PNL BADGES ========== */
@@ -338,11 +471,11 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
 
 .rounds-header, .rounds-row {
   display: grid;
-  grid-template-columns: 90px 100px 110px 90px 100px 80px 100px 75px 90px;
-  gap: 0.5rem;
+  grid-template-columns: 80px 95px 100px 80px 95px 75px 75px 80px 65px 95px 70px 75px;
+  gap: 0.35rem;
   padding: 0.5rem 0.75rem;
   align-items: center;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
 }
 .rounds-header {
   color: var(--text-muted);
@@ -369,8 +502,22 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
 .round-type.open { color: var(--yellow); }
 .round-type.closed { color: var(--text-secondary); }
 
-.fee-val { color: var(--text-muted); font-size: 0.75rem; }
 .hold-time { color: var(--text-secondary); font-size: 0.75rem; }
+
+/* Total rows */
+.rounds-total, .log-total {
+  background: rgba(216, 109, 203, 0.06) !important;
+  border-top: 1px solid var(--border-accent) !important;
+  border-bottom: none !important;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+}
+.rounds-total span:first-child, .log-total span:first-child {
+  color: var(--accent);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+}
 
 /* ========== TRADE LOG ========== */
 .trades-log { margin-bottom: 1rem; }
@@ -378,11 +525,11 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
 
 .log-header, .log-row {
   display: grid;
-  grid-template-columns: 90px 65px 110px 100px 110px 1fr;
-  gap: 0.5rem;
+  grid-template-columns: 85px 60px 100px 90px 100px 85px 65px 65px;
+  gap: 0.4rem;
   padding: 0.45rem 0.75rem;
   align-items: center;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
 }
 .log-header {
   color: var(--text-muted);
@@ -482,10 +629,12 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
 }
 
 @media (max-width: 480px) {
-  .summary-grid { grid-template-columns: 1fr; }
-  .summary-value { font-size: 1.3rem; }
-  .pnl-badge.large { font-size: 1.2rem; }
+  .stats-row { flex-direction: column; }
+  .pnl-badge.hero { font-size: 1.6rem; }
+  .hero-breakdown { gap: 0.75rem; }
+  .hero-divider { display: none; }
+  .fee-callout-grid { grid-template-columns: 1fr 1fr; }
   .rounds-table, .log-table { overflow-x: auto; }
-  .rounds-header, .rounds-row { min-width: 800px; }
-  .log-header, .log-row { min-width: 550px; }
+  .rounds-header, .rounds-row { min-width: 1050px; }
+  .log-header, .log-row { min-width: 650px; }
 }

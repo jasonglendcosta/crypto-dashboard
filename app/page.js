@@ -44,6 +44,14 @@ function PnlPercent({ value }) {
   );
 }
 
+function FeeBadge({ usd, percent }) {
+  return (
+    <span className="fee-badge">
+      {formatUSD(usd)} <span className="fee-pct">({percent.toFixed(3)}%)</span>
+    </span>
+  );
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [portfolio, setPortfolio] = useState(null);
@@ -60,16 +68,13 @@ export default function Dashboard() {
         fetch('/api/trades', { cache: 'no-store' }),
         fetch('/api/portfolio', { cache: 'no-store' }),
       ]);
-
       if (!tradesRes.ok) throw new Error(`Trades API: ${tradesRes.status}`);
       const tradesData = await tradesRes.json();
       setData(tradesData);
-
       if (portfolioRes.ok) {
         const pData = await portfolioRes.json();
         setPortfolio(pData);
       }
-
       setLastRefresh(new Date());
       setCountdown(30);
       setError(null);
@@ -80,14 +85,12 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Initial load + polling
   useEffect(() => {
     fetchAll();
     const interval = setInterval(fetchAll, 30000);
     return () => clearInterval(interval);
   }, [fetchAll]);
 
-  // Countdown timer
   useEffect(() => {
     timerRef.current = setInterval(() => {
       setCountdown(c => (c <= 1 ? 30 : c - 1));
@@ -108,7 +111,7 @@ export default function Dashboard() {
 
   const summary = data?.summary || {};
   const symbols = data?.symbols || [];
-  const hasTradestoday = symbols.length > 0;
+  const hasTradesToday = symbols.length > 0;
 
   return (
     <div className="dashboard">
@@ -136,47 +139,70 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Daily Summary Cards */}
-      <div className="summary-grid">
-        <div className={`summary-card ${summary.totalPnl >= 0 ? 'card-green' : 'card-red'}`}>
-          <div className="summary-label">Daily P&L</div>
-          <div className="summary-value">
-            <PnlBadge value={summary.totalPnl || 0} size="large" />
-          </div>
-          <div className="summary-sub">
-            Realized: {formatUSD(summary.realizedPnl || 0)} · Unrealized: {formatUSD(summary.unrealizedPnl || 0)}
+      {/* ===== DAILY P&L HERO ===== */}
+      <div className={`pnl-hero ${summary.totalPnl >= 0 ? 'hero-green' : 'hero-red'}`}>
+        <div className="hero-main">
+          <div className="hero-label">Today's Net P&L</div>
+          <div className="hero-value">
+            <PnlBadge value={summary.totalPnl || 0} size="hero" />
           </div>
         </div>
-
-        <div className="summary-card">
-          <div className="summary-label">Total Trades</div>
-          <div className="summary-value count">{summary.totalTrades || 0}</div>
-          <div className="summary-sub">Across {symbols.length} pair{symbols.length !== 1 ? 's' : ''}</div>
-        </div>
-
-        <div className="summary-card">
-          <div className="summary-label">Volume</div>
-          <div className="summary-value volume">{formatUSD(summary.totalVolume || 0)}</div>
-          <div className="summary-sub">Total traded today</div>
-        </div>
-
-        <div className="summary-card">
-          <div className="summary-label">Fees Paid</div>
-          <div className="summary-value fees">{formatUSD(summary.totalFees || 0)}</div>
-          <div className="summary-sub">Net after fees: {formatUSD(summary.netPnl || 0)}</div>
-        </div>
-
-        {portfolio && (
-          <div className="summary-card">
-            <div className="summary-label">Portfolio Value</div>
-            <div className="summary-value portfolio">{formatUSD(portfolio.totalValue || 0)}</div>
-            <div className="summary-sub">{portfolio.holdings?.length || 0} assets</div>
+        <div className="hero-breakdown">
+          <div className="hero-stat">
+            <span className="hero-stat-label">Gross P&L</span>
+            <span className="hero-stat-value">
+              <PnlBadge value={(summary.realizedPnl || 0) + (summary.unrealizedPnl || 0) + (summary.totalFees || 0)} />
+            </span>
           </div>
-        )}
+          <div className="hero-divider" />
+          <div className="hero-stat">
+            <span className="hero-stat-label">Total Fees</span>
+            <span className="hero-stat-value fee-highlight">
+              -{formatUSD(summary.totalFees || 0)}
+              <span className="fee-pct-inline">({(summary.feePercent || 0).toFixed(3)}%)</span>
+            </span>
+          </div>
+          <div className="hero-divider" />
+          <div className="hero-stat">
+            <span className="hero-stat-label">Realized</span>
+            <span className="hero-stat-value"><PnlBadge value={summary.realizedPnl || 0} /></span>
+          </div>
+          <div className="hero-divider" />
+          <div className="hero-stat">
+            <span className="hero-stat-label">Unrealized</span>
+            <span className="hero-stat-value"><PnlBadge value={summary.unrealizedPnl || 0} /></span>
+          </div>
+        </div>
       </div>
 
-      {/* Per-Symbol Breakdown */}
-      {hasTradestoday ? (
+      {/* ===== STATS ROW ===== */}
+      <div className="stats-row">
+        <div className="stat-pill">
+          <span className="stat-pill-label">Trades</span>
+          <span className="stat-pill-value accent">{summary.totalTrades || 0}</span>
+        </div>
+        <div className="stat-pill">
+          <span className="stat-pill-label">Volume</span>
+          <span className="stat-pill-value">{formatUSD(summary.totalVolume || 0)}</span>
+        </div>
+        <div className="stat-pill">
+          <span className="stat-pill-label">Pairs</span>
+          <span className="stat-pill-value accent">{symbols.length}</span>
+        </div>
+        {portfolio && (
+          <div className="stat-pill">
+            <span className="stat-pill-label">Portfolio</span>
+            <span className="stat-pill-value">{formatUSD(portfolio.totalValue || 0)}</span>
+          </div>
+        )}
+        <div className="stat-pill">
+          <span className="stat-pill-label">Avg Fee</span>
+          <span className="stat-pill-value fee-highlight">{(summary.feePercent || 0).toFixed(3)}%</span>
+        </div>
+      </div>
+
+      {/* ===== PER-SYMBOL BREAKDOWN ===== */}
+      {hasTradesToday ? (
         <div className="trades-section">
           <h2 className="section-title">📊 Trades by Asset</h2>
 
@@ -185,13 +211,15 @@ export default function Dashboard() {
             const pnl = sym.pnl || {};
             const isProfitable = pnl.totalPnl >= 0;
 
+            // Calculate total fees for this symbol from trades
+            const symbolFees = sym.trades.reduce((sum, t) => sum + (t.feeUSDT || 0), 0);
+            const symbolVolume = sym.trades.reduce((sum, t) => sum + t.quoteQty, 0);
+            const symbolFeePercent = symbolVolume > 0 ? (symbolFees / symbolVolume) * 100 : 0;
+
             return (
               <div key={sym.symbol} className={`symbol-card ${isProfitable ? 'profitable' : 'losing'}`}>
-                {/* Symbol Header — clickable */}
-                <div
-                  className="symbol-header"
-                  onClick={() => setExpandedSymbol(isExpanded ? null : sym.symbol)}
-                >
+                {/* Symbol Header */}
+                <div className="symbol-header" onClick={() => setExpandedSymbol(isExpanded ? null : sym.symbol)}>
                   <div className="symbol-left">
                     <span className="symbol-name">{sym.asset}</span>
                     <span className="symbol-price">{formatUSD(sym.currentPrice)}</span>
@@ -204,15 +232,15 @@ export default function Dashboard() {
                         <span className="stat-value">{sym.trades.length}</span>
                       </span>
                       <span className="stat">
-                        <span className="stat-label">Realized</span>
-                        <PnlBadge value={pnl.totalRealizedPnl || 0} />
+                        <span className="stat-label">Gross</span>
+                        <PnlBadge value={(pnl.totalPnl || 0) + (pnl.totalFees || 0)} />
                       </span>
-                      <span className="stat">
-                        <span className="stat-label">Unrealized</span>
-                        <PnlBadge value={pnl.totalUnrealizedPnl || 0} />
+                      <span className="stat fee-stat">
+                        <span className="stat-label">Fees</span>
+                        <span className="fee-highlight-sm">-{formatUSD(symbolFees)} ({symbolFeePercent.toFixed(3)}%)</span>
                       </span>
                       <span className="stat total">
-                        <span className="stat-label">Total P&L</span>
+                        <span className="stat-label">Net P&L</span>
                         <PnlBadge value={pnl.totalPnl || 0} />
                       </span>
                     </div>
@@ -220,10 +248,10 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Expanded: Trade Details */}
+                {/* Expanded Details */}
                 {isExpanded && (
                   <div className="symbol-details">
-                    {/* Round trips */}
+                    {/* Round Trips */}
                     {pnl.rounds?.length > 0 && (
                       <div className="rounds-section">
                         <h4>Round Trips</h4>
@@ -234,9 +262,12 @@ export default function Dashboard() {
                             <span>Sell Price</span>
                             <span>Qty</span>
                             <span>Gross P&L</span>
-                            <span>Fees</span>
+                            <span>Buy Fee</span>
+                            <span>Sell Fee</span>
+                            <span>Total Fee</span>
+                            <span>Fee %</span>
                             <span>Net P&L</span>
-                            <span>%</span>
+                            <span>Net %</span>
                             <span>Hold Time</span>
                           </div>
                           {pnl.rounds.map((r, i) => (
@@ -248,17 +279,35 @@ export default function Dashboard() {
                               <span>{r.sellPrice ? formatUSD(r.sellPrice) : `→ ${formatUSD(r.currentPrice)}`}</span>
                               <span>{formatQty(r.qty)}</span>
                               <span><PnlBadge value={r.grossPnl} /></span>
-                              <span className="fee-val">{formatUSD(r.fees)}</span>
+                              <span className="fee-cell">{formatUSD(r.buyFee)}</span>
+                              <span className="fee-cell">{formatUSD(r.sellFee)}</span>
+                              <span className="fee-cell-total">{formatUSD(r.totalFee)}</span>
+                              <span className="fee-cell">{r.feePercent.toFixed(3)}%</span>
                               <span><PnlBadge value={r.netPnl} /></span>
-                              <span><PnlPercent value={r.pnlPercent} /></span>
+                              <span><PnlPercent value={r.netPnlPercent} /></span>
                               <span className="hold-time">{formatDuration(r.holdTimeMs)}</span>
                             </div>
                           ))}
+                          {/* Round trip totals */}
+                          <div className="rounds-row rounds-total">
+                            <span>TOTAL</span>
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                            <span><PnlBadge value={pnl.rounds.reduce((s, r) => s + r.grossPnl, 0)} /></span>
+                            <span className="fee-cell">{formatUSD(pnl.rounds.reduce((s, r) => s + r.buyFee, 0))}</span>
+                            <span className="fee-cell">{formatUSD(pnl.rounds.reduce((s, r) => s + r.sellFee, 0))}</span>
+                            <span className="fee-cell-total">{formatUSD(pnl.totalFees)}</span>
+                            <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span>
+                            <span><PnlBadge value={pnl.totalPnl} /></span>
+                            <span></span>
+                            <span></span>
+                          </div>
                         </div>
                       </div>
                     )}
 
-                    {/* Raw trade log */}
+                    {/* Trade Log */}
                     <div className="trades-log">
                       <h4>Trade Log</h4>
                       <div className="log-table">
@@ -268,7 +317,9 @@ export default function Dashboard() {
                           <span>Price</span>
                           <span>Qty</span>
                           <span>Total</span>
-                          <span>Fee</span>
+                          <span>Fee (USD)</span>
+                          <span>Fee %</span>
+                          <span>Type</span>
                         </div>
                         {sym.trades.map((t) => (
                           <div key={t.id} className={`log-row ${t.side === 'BUY' ? 'buy-row' : 'sell-row'}`}>
@@ -277,13 +328,55 @@ export default function Dashboard() {
                             <span>{formatUSD(t.price)}</span>
                             <span>{formatQty(t.qty)}</span>
                             <span>{formatUSD(t.quoteQty)}</span>
-                            <span className="fee-val">{t.commission.toFixed(6)} {t.commissionAsset}</span>
+                            <span className="fee-cell">{formatUSD(t.feeUSDT)}</span>
+                            <span className="fee-cell">{t.feePercent.toFixed(3)}%</span>
+                            <span className={`maker-badge ${t.isMaker ? 'maker' : 'taker'}`}>
+                              {t.isMaker ? 'Maker' : 'Taker'}
+                            </span>
                           </div>
                         ))}
+                        {/* Trade log totals */}
+                        <div className="log-row log-total">
+                          <span>TOTAL</span>
+                          <span>{sym.trades.length} trades</span>
+                          <span></span>
+                          <span></span>
+                          <span>{formatUSD(symbolVolume)}</span>
+                          <span className="fee-cell-total">{formatUSD(symbolFees)}</span>
+                          <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span>
+                          <span></span>
+                        </div>
                       </div>
                     </div>
 
-                    {/* 24h market context */}
+                    {/* Fee Breakdown Callout */}
+                    <div className="fee-callout">
+                      <div className="fee-callout-title">💰 Fee Impact</div>
+                      <div className="fee-callout-grid">
+                        <div>
+                          <div className="fc-label">Total Fees</div>
+                          <div className="fc-value fee-highlight">{formatUSD(symbolFees)}</div>
+                        </div>
+                        <div>
+                          <div className="fc-label">Fee Rate</div>
+                          <div className="fc-value">{symbolFeePercent.toFixed(3)}%</div>
+                        </div>
+                        <div>
+                          <div className="fc-label">Break-even Spread</div>
+                          <div className="fc-value">{(symbolFeePercent * 2).toFixed(3)}%</div>
+                        </div>
+                        <div>
+                          <div className="fc-label">Fees as % of P&L</div>
+                          <div className="fc-value fee-highlight">
+                            {pnl.totalPnl !== 0
+                              ? Math.abs((symbolFees / (Math.abs(pnl.totalPnl) + symbolFees)) * 100).toFixed(1) + '%'
+                              : '—'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Market Context */}
                     <div className="market-context">
                       <span>24h High: {formatUSD(sym.ticker?.highPrice)}</span>
                       <span>24h Low: {formatUSD(sym.ticker?.lowPrice)}</span>
