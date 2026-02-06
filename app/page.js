@@ -5,104 +5,108 @@ const TRACKED_SYMBOLS = [
   'BTCUSDT', 'TAOUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT',
   'ICPUSDT', 'FILUSDT', 'FETUSDT', 'ONDOUSDT', 'JUPUSDT',
   'ARKMUSDT', 'RNDRUSDT', 'INJUSDT', 'ETHUSDT', 'DOTUSDT',
-  'AVAXUSDT', 'LINKUSDT', 'MATICUSDT', 'APTUSDT', 'NEARUSDT'
+  'AVAXUSDT', 'LINKUSDT', 'APTUSDT', 'NEARUSDT'
 ];
 
-// --- All Binance calls go through /api/proxy (avoids CORS + geo-block) ---
-async function binanceSigned(path, params = {}) {
+// ===================== PROXY HELPER =====================
+async function proxy(path, params = {}, signed = false) {
   const res = await fetch('/api/proxy', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, params: { ...params, _signed: true } }),
+    body: JSON.stringify({ path, params: signed ? { ...params, _signed: true } : params }),
   });
-  if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
+  if (!res.ok) throw new Error(`Proxy ${res.status}`);
   return res.json();
 }
 
-async function binancePublic(path, params = {}) {
-  const res = await fetch('/api/proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, params }),
-  });
-  if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
-  return res.json();
-}
+// ===================== FORMATTING =====================
+const fmt = {
+  usd(n) {
+    if (n == null || isNaN(n)) return '$0.00';
+    const abs = Math.abs(n), sign = n < 0 ? '-' : '';
+    if (abs >= 1000) return sign + '$' + abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (abs >= 0.01) return sign + '$' + abs.toFixed(2);
+    return sign + '$' + abs.toFixed(4);
+  },
+  qty(n) { return n >= 1 ? n.toFixed(4) : n.toFixed(6); },
+  time(ts) { return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); },
+  dur(ms) {
+    if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
+    if (ms < 3600000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+    return `${Math.floor(ms / 3600000)}h ${Math.floor((ms % 3600000) / 60000)}m`;
+  },
+  pct(n) { return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; },
+};
 
-// --- Formatting ---
-function formatUSD(n) {
-  if (n == null || isNaN(n)) return '$0.00';
-  const abs = Math.abs(n);
-  const sign = n < 0 ? '-' : '';
-  if (abs >= 1000) return sign + '$' + abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  if (abs >= 1) return sign + '$' + abs.toFixed(2);
-  return sign + '$' + abs.toFixed(4);
-}
-
-function formatQty(n) {
-  if (n >= 1) return n.toFixed(4);
-  return n.toFixed(6);
-}
-
-function formatTime(ts) {
-  return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-}
-
-function formatDuration(ms) {
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-  if (ms < 3600000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
-  return `${Math.floor(ms / 3600000)}h ${Math.floor((ms % 3600000) / 60000)}m`;
-}
-
-function PnlBadge({ value, size = 'normal' }) {
-  const isPositive = value >= 0;
-  const cls = `pnl-badge ${isPositive ? 'positive' : 'negative'} ${size}`;
-  return <span className={cls}>{isPositive ? '▲' : '▼'} {formatUSD(value)}</span>;
-}
-
-function PnlPercent({ value }) {
-  const isPositive = value >= 0;
-  return <span className={`pnl-pct ${isPositive ? 'positive' : 'negative'}`}>{isPositive ? '+' : ''}{value.toFixed(2)}%</span>;
-}
-
-// --- P&L Calculation (FIFO matching) ---
-function calculatePnL(trades, currentPrice, bnbPrice) {
-  const buys = [];
-  const rounds = [];
-  let totalRealizedPnl = 0;
-  let totalFees = 0;
-
+// ===================== MERGE PARTIAL FILLS =====================
+// Binance splits large orders into multiple fills at same price/second — merge them
+function mergePartialFills(trades) {
+  if (!trades.length) return [];
   const sorted = [...trades].sort((a, b) => a.time - b.time);
+  const merged = [];
+  let current = null;
 
   for (const t of sorted) {
     const price = parseFloat(t.price);
     const qty = parseFloat(t.qty);
+    const quoteQty = parseFloat(t.quoteQty);
     const commission = parseFloat(t.commission);
-    const commAsset = t.commissionAsset;
-    const feeUSD = commAsset === 'USDT' ? commission : commAsset === 'BNB' ? commission * bnbPrice : commission * currentPrice;
+
+    // Merge if same order (orderId), same side, same price, within 2 seconds
+    if (current && current.orderId === t.orderId && current.isBuyer === t.isBuyer && current.price === price) {
+      current.qty += qty;
+      current.quoteQty += quoteQty;
+      current.commission += commission;
+      current.fillCount++;
+      current.timeEnd = t.time;
+    } else {
+      if (current) merged.push(current);
+      current = {
+        id: t.id, orderId: t.orderId, time: t.time, timeEnd: t.time,
+        isBuyer: t.isBuyer, isMaker: t.isMaker, price, qty, quoteQty,
+        commission, commissionAsset: t.commissionAsset, fillCount: 1,
+        symbol: t.symbol,
+      };
+    }
+  }
+  if (current) merged.push(current);
+  return merged;
+}
+
+// ===================== P&L CALCULATION (FIFO) =====================
+function calculatePnL(mergedTrades, currentPrice, bnbPrice) {
+  const buys = [];
+  const rounds = [];
+  let totalRealizedPnl = 0, totalFees = 0;
+
+  const feeToUSD = (commission, asset, price) => {
+    if (asset === 'USDT') return commission;
+    if (asset === 'BNB') return commission * bnbPrice;
+    return commission * price;
+  };
+
+  for (const t of mergedTrades) {
+    const feeUSD = feeToUSD(t.commission, t.commissionAsset, t.price);
 
     if (t.isBuyer) {
-      buys.push({ price, qty, feeUSD, time: t.time });
+      buys.push({ price: t.price, qty: t.qty, feeUSD, time: t.time });
     } else {
-      let remainSell = qty;
+      let remainSell = t.qty;
       while (remainSell > 0 && buys.length > 0) {
         const buy = buys[0];
         const matchQty = Math.min(remainSell, buy.qty);
-        const grossPnl = (price - buy.price) * matchQty;
-        const buyFee = buy.feeUSD * (matchQty / (buy.qty + matchQty - remainSell || 1));
-        const sellFee = feeUSD * (matchQty / qty);
-        const totalFee = buyFee + sellFee;
+        const grossPnl = (t.price - buy.price) * matchQty;
+        const buyFeeShare = buy.feeUSD * (matchQty / buy.qty);
+        const sellFeeShare = feeUSD * (matchQty / t.qty);
+        const totalFee = buyFeeShare + sellFeeShare;
         const netPnl = grossPnl - totalFee;
-        const volume = (buy.price + price) * matchQty;
 
         rounds.push({
-          type: 'closed', buyPrice: buy.price, sellPrice: price, qty: matchQty,
-          grossPnl, buyFee, sellFee, totalFee,
-          feePercent: volume > 0 ? (totalFee / volume) * 100 : 0,
-          netPnl, netPnlPercent: buy.price > 0 ? (netPnl / (buy.price * matchQty)) * 100 : 0,
+          type: 'closed', buyPrice: buy.price, sellPrice: t.price, qty: matchQty,
+          grossPnl, buyFee: buyFeeShare, sellFee: sellFeeShare, totalFee,
+          netPnl, netPct: buy.price > 0 ? (netPnl / (buy.price * matchQty)) * 100 : 0,
           holdTimeMs: t.time - buy.time,
         });
-
         totalRealizedPnl += netPnl;
         totalFees += totalFee;
         buy.qty -= matchQty;
@@ -112,7 +116,6 @@ function calculatePnL(trades, currentPrice, bnbPrice) {
     }
   }
 
-  // Open positions
   let totalUnrealizedPnl = 0;
   for (const buy of buys) {
     if (buy.qty > 0) {
@@ -123,8 +126,7 @@ function calculatePnL(trades, currentPrice, bnbPrice) {
       rounds.push({
         type: 'open', buyPrice: buy.price, sellPrice: null, currentPrice, qty: buy.qty,
         grossPnl, buyFee: buy.feeUSD, sellFee: 0, totalFee: buy.feeUSD,
-        feePercent: buy.price > 0 ? (buy.feeUSD / (buy.price * buy.qty)) * 100 : 0,
-        netPnl, netPnlPercent: buy.price > 0 ? (netPnl / (buy.price * buy.qty)) * 100 : 0,
+        netPnl, netPct: buy.price > 0 ? (netPnl / (buy.price * buy.qty)) * 100 : 0,
         holdTimeMs: Date.now() - buy.time,
       });
     }
@@ -133,97 +135,75 @@ function calculatePnL(trades, currentPrice, bnbPrice) {
   return { rounds, totalRealizedPnl, totalUnrealizedPnl, totalPnl: totalRealizedPnl + totalUnrealizedPnl, totalFees };
 }
 
-// --- Data fetching (all from browser) ---
+// ===================== DATA FETCHING =====================
 async function fetchAllData() {
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
-  const startTime = todayStart.getTime();
+  const startTime = String(todayStart.getTime());
 
-  // Fetch trades for all symbols in parallel
   const tradeResults = await Promise.all(
     TRACKED_SYMBOLS.map(async (symbol) => {
       try {
-        const data = await binanceSigned('/api/v3/myTrades', { symbol, startTime: String(startTime) });
+        const data = await proxy('/api/v3/myTrades', { symbol, startTime }, true);
         return { symbol, trades: Array.isArray(data) ? data : [] };
-      } catch {
-        return { symbol, trades: [] };
-      }
+      } catch { return { symbol, trades: [] }; }
     })
   );
 
   const activeSymbols = tradeResults.filter(r => r.trades.length > 0);
+  let bnbPrice = 630;
+  try { const bp = await proxy('/api/v3/ticker/price', { symbol: 'BNBUSDT' }); if (bp.price) bnbPrice = parseFloat(bp.price); } catch {}
 
-  // Get BNB price for fee conversion
-  let bnbPrice = 600;
-  try {
-    const bp = await binancePublic('/api/v3/ticker/price', { symbol: 'BNBUSDT' });
-    if (bp.price) bnbPrice = parseFloat(bp.price);
-  } catch {}
-
-  // Enrich active symbols with price + ticker
   const enriched = await Promise.all(
     activeSymbols.map(async ({ symbol, trades }) => {
       const asset = symbol.replace('USDT', '');
       let currentPrice = 0, ticker = {};
       try {
-        const [priceData, tickerData] = await Promise.all([
-          binancePublic('/api/v3/ticker/price', { symbol }),
-          binancePublic('/api/v3/ticker/24hr', { symbol }),
+        const [pd, td] = await Promise.all([
+          proxy('/api/v3/ticker/price', { symbol }),
+          proxy('/api/v3/ticker/24hr', { symbol }),
         ]);
-        currentPrice = parseFloat(priceData.price || 0);
+        currentPrice = parseFloat(pd.price || 0);
         ticker = {
-          priceChangePercent: parseFloat(tickerData.priceChangePercent || 0),
-          highPrice: parseFloat(tickerData.highPrice || 0),
-          lowPrice: parseFloat(tickerData.lowPrice || 0),
-          quoteVolume: parseFloat(tickerData.quoteVolume || 0),
+          priceChangePercent: parseFloat(td.priceChangePercent || 0),
+          highPrice: parseFloat(td.highPrice || 0),
+          lowPrice: parseFloat(td.lowPrice || 0),
+          quoteVolume: parseFloat(td.quoteVolume || 0),
         };
       } catch {}
 
-      const pnl = calculatePnL(trades, currentPrice, bnbPrice);
+      const merged = mergePartialFills(trades);
+      const pnl = calculatePnL(merged, currentPrice, bnbPrice);
 
-      const tradeLog = trades.map(t => {
-        const commission = parseFloat(t.commission);
-        const commAsset = t.commissionAsset;
-        const feeUSDT = commAsset === 'USDT' ? commission : commAsset === 'BNB' ? commission * bnbPrice : commission * currentPrice;
-        const quoteQty = parseFloat(t.quoteQty);
+      const feeToUSD = (c, a) => a === 'USDT' ? c : a === 'BNB' ? c * bnbPrice : c * currentPrice;
+      const tradeLog = merged.map(t => {
+        const feeUSD = feeToUSD(t.commission, t.commissionAsset);
         return {
-          id: t.id, time: t.time, side: t.isBuyer ? 'BUY' : 'SELL',
-          price: parseFloat(t.price), qty: parseFloat(t.qty), quoteQty,
-          feeUSDT, feePercent: quoteQty > 0 ? (feeUSDT / quoteQty) * 100 : 0,
-          isMaker: t.isMaker,
+          id: t.id, orderId: t.orderId, time: t.time, side: t.isBuyer ? 'BUY' : 'SELL',
+          price: t.price, qty: t.qty, quoteQty: t.quoteQty,
+          feeUSD, feePct: t.quoteQty > 0 ? (feeUSD / t.quoteQty) * 100 : 0,
+          feeAsset: t.commissionAsset, isMaker: t.isMaker, fillCount: t.fillCount,
         };
       });
 
-      return { symbol, asset, currentPrice, ticker, trades: tradeLog, pnl };
+      return { symbol, asset, currentPrice, ticker, trades: tradeLog, pnl, rawTradeCount: trades.length, mergedTradeCount: merged.length };
     })
   );
 
-  // Summary
-  let totalTrades = 0, totalVolume = 0, dailyRealizedPnl = 0, dailyUnrealizedPnl = 0, dailyFees = 0;
-  enriched.forEach(e => {
-    dailyRealizedPnl += e.pnl.totalRealizedPnl;
-    dailyUnrealizedPnl += e.pnl.totalUnrealizedPnl;
-    dailyFees += e.pnl.totalFees;
-    totalTrades += e.trades.length;
-    e.trades.forEach(t => { totalVolume += t.quoteQty; });
-  });
-
-  // Also fetch portfolio
+  // Portfolio
   let portfolio = null;
   try {
-    const account = await binanceSigned('/api/v3/account');
-    if (account && account.balances) {
+    const account = await proxy('/api/v3/account', {}, true);
+    if (account?.balances) {
       const holdings = account.balances.filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0);
       const symbolList = holdings.filter(h => h.asset !== 'USDT').map(h => h.asset + 'USDT');
-      
       let prices = {};
       if (symbolList.length > 0) {
         try {
-          const pd = await binancePublic('/api/v3/ticker/price', { symbols: JSON.stringify(symbolList) });
+          const pd = await proxy('/api/v3/ticker/price', { symbols: JSON.stringify(symbolList) });
           if (Array.isArray(pd)) pd.forEach(p => { prices[p.symbol.replace('USDT', '')] = parseFloat(p.price); });
         } catch {}
       }
-
       let totalValue = 0;
       const items = holdings.map(h => {
         const balance = parseFloat(h.free) + parseFloat(h.locked);
@@ -231,25 +211,48 @@ async function fetchAllData() {
         const value = balance * price;
         totalValue += value;
         return { asset: h.asset, balance, price, value };
-      });
+      }).filter(h => h.value > 0.01).sort((a, b) => b.value - a.value);
       portfolio = { holdings: items, totalValue };
     }
   } catch {}
 
+  // Summary
+  let totalTrades = 0, totalVolume = 0, dailyRealizedPnl = 0, dailyUnrealizedPnl = 0, dailyFees = 0;
+  enriched.forEach(e => {
+    dailyRealizedPnl += e.pnl.totalRealizedPnl;
+    dailyUnrealizedPnl += e.pnl.totalUnrealizedPnl;
+    dailyFees += e.pnl.totalFees;
+    totalTrades += e.rawTradeCount;
+    e.trades.forEach(t => { totalVolume += t.quoteQty; });
+  });
+
   return {
-    symbols: enriched,
+    symbols: enriched, portfolio,
     summary: {
-      totalTrades, totalVolume,
-      realizedPnl: dailyRealizedPnl, unrealizedPnl: dailyUnrealizedPnl,
-      totalPnl: dailyRealizedPnl + dailyUnrealizedPnl,
-      totalFees: dailyFees, netPnl: dailyRealizedPnl + dailyUnrealizedPnl,
+      totalTrades, mergedTrades: enriched.reduce((s, e) => s + e.mergedTradeCount, 0),
+      totalVolume, realizedPnl: dailyRealizedPnl, unrealizedPnl: dailyUnrealizedPnl,
+      totalPnl: dailyRealizedPnl + dailyUnrealizedPnl, totalFees: dailyFees,
       feePercent: totalVolume > 0 ? (dailyFees / totalVolume) * 100 : 0,
     },
-    portfolio,
   };
 }
 
-// ===================== DASHBOARD COMPONENT =====================
+// ===================== COMPONENTS =====================
+function PnL({ value, size = '' }) {
+  const pos = value >= 0;
+  return <span className={`pnl ${pos ? 'green' : 'red'} ${size}`}>{pos ? '▲' : '▼'} {fmt.usd(value)}</span>;
+}
+
+function Pct({ value }) {
+  const pos = value >= 0;
+  return <span className={`pct ${pos ? 'green' : 'red'}`}>{fmt.pct(value)}</span>;
+}
+
+function Badge({ type, children }) {
+  return <span className={`badge badge-${type}`}>{children}</span>;
+}
+
+// ===================== DASHBOARD =====================
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -257,6 +260,7 @@ export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState(null);
   const [countdown, setCountdown] = useState(30);
   const [expandedSymbol, setExpandedSymbol] = useState(null);
+  const [viewMode, setViewMode] = useState('all'); // all | buys | sells
   const timerRef = useRef(null);
 
   const fetchAll = useCallback(async () => {
@@ -266,261 +270,195 @@ export default function Dashboard() {
       setLastRefresh(new Date());
       setCountdown(30);
       setError(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { setError(err.message); }
+    finally { setLoading(false); }
   }, []);
 
-  useEffect(() => {
-    fetchAll();
-    const interval = setInterval(fetchAll, 30000);
-    return () => clearInterval(interval);
-  }, [fetchAll]);
+  useEffect(() => { fetchAll(); const i = setInterval(fetchAll, 30000); return () => clearInterval(i); }, [fetchAll]);
+  useEffect(() => { timerRef.current = setInterval(() => setCountdown(c => c <= 1 ? 30 : c - 1), 1000); return () => clearInterval(timerRef.current); }, []);
 
-  useEffect(() => {
-    timerRef.current = setInterval(() => {
-      setCountdown(c => (c <= 1 ? 30 : c - 1));
-    }, 1000);
-    return () => clearInterval(timerRef.current);
-  }, []);
+  if (loading) return (
+    <div className="dash"><div className="loading"><div className="spinner" /><p>Connecting to Binance...</p></div></div>
+  );
 
-  if (loading) {
-    return (
-      <div className="dashboard">
-        <div className="loading-screen">
-          <div className="spinner-large" />
-          <p>Connecting to Binance...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const summary = data?.summary || {};
-  const symbols = data?.symbols || [];
-  const portfolio = data?.portfolio;
-  const hasTradesToday = symbols.length > 0;
+  const { summary = {}, symbols = [], portfolio } = data || {};
+  const hasTrades = symbols.length > 0;
 
   return (
-    <div className="dashboard">
-      {/* Header */}
-      <header className="header">
-        <div className="header-left">
-          <h1>⚡ TRADE TRACKER</h1>
-          <span className="header-date">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</span>
+    <div className="dash">
+      {/* ===== HEADER ===== */}
+      <header className="hdr">
+        <div className="hdr-l">
+          <h1>⚡ CRYPTO COMMAND</h1>
+          <span className="hdr-date">{new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</span>
         </div>
-        <div className="header-right">
-          <div className="live-indicator">
-            <span className="live-dot" />
-            LIVE
-          </div>
-          <div className="refresh-info">
-            <span className="countdown">{countdown}s</span>
-            <button className="btn-refresh" onClick={fetchAll}>↻ Refresh</button>
-          </div>
+        <div className="hdr-r">
+          <div className="live"><span className="live-dot" />LIVE</div>
+          <span className="cd">{countdown}s</span>
+          <button className="btn-ref" onClick={fetchAll}>↻</button>
         </div>
       </header>
 
-      {error && (
-        <div className="error-banner">
-          ⚠️ {error} — <button onClick={fetchAll}>Retry</button>
+      {error && <div className="err">⚠️ {error} <button onClick={fetchAll}>Retry</button></div>}
+
+      {/* ===== P&L HERO ===== */}
+      <div className={`hero ${summary.totalPnl >= 0 ? 'hero-g' : 'hero-r'}`}>
+        <div className="hero-main">
+          <span className="hero-lbl">Today's P&L</span>
+          <PnL value={summary.totalPnl || 0} size="xl" />
+        </div>
+        <div className="hero-stats">
+          <div className="hs"><span className="hs-l">Realized</span><PnL value={summary.realizedPnl || 0} /></div>
+          <div className="hs"><span className="hs-l">Unrealized</span><PnL value={summary.unrealizedPnl || 0} /></div>
+          <div className="hs"><span className="hs-l">Fees Paid</span><span className="fee-val">-{fmt.usd(summary.totalFees || 0)}</span></div>
+        </div>
+      </div>
+
+      {/* ===== QUICK STATS ===== */}
+      <div className="pills">
+        <div className="pill"><span className="pill-l">Fills</span><span className="pill-v accent">{summary.totalTrades || 0}</span></div>
+        <div className="pill"><span className="pill-l">Orders</span><span className="pill-v accent">{summary.mergedTrades || 0}</span></div>
+        <div className="pill"><span className="pill-l">Volume</span><span className="pill-v">{fmt.usd(summary.totalVolume || 0)}</span></div>
+        <div className="pill"><span className="pill-l">Pairs</span><span className="pill-v accent">{symbols.length}</span></div>
+        {portfolio && <div className="pill"><span className="pill-l">Portfolio</span><span className="pill-v">{fmt.usd(portfolio.totalValue || 0)}</span></div>}
+        <div className="pill"><span className="pill-l">Avg Fee</span><span className="pill-v fee-val">{(summary.feePercent || 0).toFixed(3)}%</span></div>
+      </div>
+
+      {/* ===== VIEW MODE TOGGLE ===== */}
+      {hasTrades && (
+        <div className="view-toggle">
+          <button className={`vt-btn ${viewMode === 'all' ? 'active' : ''}`} onClick={() => setViewMode('all')}>All Trades</button>
+          <button className={`vt-btn vt-buy ${viewMode === 'buys' ? 'active' : ''}`} onClick={() => setViewMode('buys')}>🟢 Buys Only</button>
+          <button className={`vt-btn vt-sell ${viewMode === 'sells' ? 'active' : ''}`} onClick={() => setViewMode('sells')}>🔴 Sells Only</button>
         </div>
       )}
 
-      {/* ===== DAILY P&L HERO ===== */}
-      <div className={`pnl-hero ${summary.totalPnl >= 0 ? 'hero-green' : 'hero-red'}`}>
-        <div className="hero-main">
-          <div className="hero-label">Today's Net P&L</div>
-          <div className="hero-value">
-            <PnlBadge value={summary.totalPnl || 0} size="hero" />
-          </div>
-        </div>
-        <div className="hero-breakdown">
-          <div className="hero-stat">
-            <span className="hero-stat-label">Gross P&L</span>
-            <span className="hero-stat-value">
-              <PnlBadge value={(summary.realizedPnl || 0) + (summary.unrealizedPnl || 0) + (summary.totalFees || 0)} />
-            </span>
-          </div>
-          <div className="hero-divider" />
-          <div className="hero-stat">
-            <span className="hero-stat-label">Total Fees</span>
-            <span className="hero-stat-value fee-highlight">
-              -{formatUSD(summary.totalFees || 0)}
-              <span className="fee-pct-inline">({(summary.feePercent || 0).toFixed(3)}%)</span>
-            </span>
-          </div>
-          <div className="hero-divider" />
-          <div className="hero-stat">
-            <span className="hero-stat-label">Realized</span>
-            <span className="hero-stat-value"><PnlBadge value={summary.realizedPnl || 0} /></span>
-          </div>
-          <div className="hero-divider" />
-          <div className="hero-stat">
-            <span className="hero-stat-label">Unrealized</span>
-            <span className="hero-stat-value"><PnlBadge value={summary.unrealizedPnl || 0} /></span>
-          </div>
-        </div>
-      </div>
-
-      {/* ===== STATS ROW ===== */}
-      <div className="stats-row">
-        <div className="stat-pill">
-          <span className="stat-pill-label">Trades</span>
-          <span className="stat-pill-value accent">{summary.totalTrades || 0}</span>
-        </div>
-        <div className="stat-pill">
-          <span className="stat-pill-label">Volume</span>
-          <span className="stat-pill-value">{formatUSD(summary.totalVolume || 0)}</span>
-        </div>
-        <div className="stat-pill">
-          <span className="stat-pill-label">Pairs</span>
-          <span className="stat-pill-value accent">{symbols.length}</span>
-        </div>
-        {portfolio && (
-          <div className="stat-pill">
-            <span className="stat-pill-label">Portfolio</span>
-            <span className="stat-pill-value">{formatUSD(portfolio.totalValue || 0)}</span>
-          </div>
-        )}
-        <div className="stat-pill">
-          <span className="stat-pill-label">Avg Fee</span>
-          <span className="stat-pill-value fee-highlight">{(summary.feePercent || 0).toFixed(3)}%</span>
-        </div>
-      </div>
-
-      {/* ===== PER-SYMBOL BREAKDOWN ===== */}
-      {hasTradesToday ? (
-        <div className="trades-section">
-          <h2 className="section-title">📊 Trades by Asset</h2>
-
+      {/* ===== TRADES BY ASSET ===== */}
+      {hasTrades ? (
+        <div className="trades-sec">
           {symbols.map((sym) => {
             const isExpanded = expandedSymbol === sym.symbol;
-            const pnl = sym.pnl || {};
+            const { pnl } = sym;
             const isProfitable = pnl.totalPnl >= 0;
-            const symbolFees = sym.trades.reduce((sum, t) => sum + (t.feeUSDT || 0), 0);
-            const symbolVolume = sym.trades.reduce((sum, t) => sum + t.quoteQty, 0);
-            const symbolFeePercent = symbolVolume > 0 ? (symbolFees / symbolVolume) * 100 : 0;
+
+            // Filter trades by view mode
+            const filteredTrades = sym.trades.filter(t =>
+              viewMode === 'all' ? true : viewMode === 'buys' ? t.side === 'BUY' : t.side === 'SELL'
+            );
+
+            const buyTrades = sym.trades.filter(t => t.side === 'BUY');
+            const sellTrades = sym.trades.filter(t => t.side === 'SELL');
+            const buyVol = buyTrades.reduce((s, t) => s + t.quoteQty, 0);
+            const sellVol = sellTrades.reduce((s, t) => s + t.quoteQty, 0);
+            const totalFees = sym.trades.reduce((s, t) => s + t.feeUSD, 0);
+            const hasBnbFees = sym.trades.some(t => t.feeAsset === 'BNB');
 
             return (
-              <div key={sym.symbol} className={`symbol-card ${isProfitable ? 'profitable' : 'losing'}`}>
-                <div className="symbol-header" onClick={() => setExpandedSymbol(isExpanded ? null : sym.symbol)}>
-                  <div className="symbol-left">
-                    <span className="symbol-name">{sym.asset}</span>
-                    <span className="symbol-price">{formatUSD(sym.currentPrice)}</span>
-                    <PnlPercent value={sym.ticker?.priceChangePercent || 0} />
+              <div key={sym.symbol} className={`sym-card ${isProfitable ? 'prof' : 'loss'}`}>
+                {/* Symbol Header */}
+                <div className="sym-hdr" onClick={() => setExpandedSymbol(isExpanded ? null : sym.symbol)}>
+                  <div className="sym-l">
+                    <span className="sym-name">{sym.asset}</span>
+                    <span className="sym-price">{fmt.usd(sym.currentPrice)}</span>
+                    <Pct value={sym.ticker?.priceChangePercent || 0} />
+                    {hasBnbFees && <Badge type="bnb">BNB Fee ✓</Badge>}
                   </div>
-                  <div className="symbol-right">
-                    <div className="symbol-stats">
-                      <span className="stat">
-                        <span className="stat-label">Trades</span>
-                        <span className="stat-value">{sym.trades.length}</span>
-                      </span>
-                      <span className="stat">
-                        <span className="stat-label">Gross</span>
-                        <PnlBadge value={(pnl.totalPnl || 0) + (pnl.totalFees || 0)} />
-                      </span>
-                      <span className="stat fee-stat">
-                        <span className="stat-label">Fees</span>
-                        <span className="fee-highlight-sm">-{formatUSD(symbolFees)} ({symbolFeePercent.toFixed(3)}%)</span>
-                      </span>
-                      <span className="stat total">
-                        <span className="stat-label">Net P&L</span>
-                        <PnlBadge value={pnl.totalPnl || 0} />
-                      </span>
+                  <div className="sym-r">
+                    <div className="sym-stats">
+                      <span className="ss"><span className="ss-l">B</span><Badge type="buy">{buyTrades.length}</Badge></span>
+                      <span className="ss"><span className="ss-l">S</span><Badge type="sell">{sellTrades.length}</Badge></span>
+                      <span className="ss"><span className="ss-l">Net</span><PnL value={pnl.totalPnl || 0} /></span>
                     </div>
-                    <span className={`expand-arrow ${isExpanded ? 'open' : ''}`}>▾</span>
+                    <span className={`arrow ${isExpanded ? 'open' : ''}`}>▾</span>
                   </div>
                 </div>
 
+                {/* Expanded Details */}
                 {isExpanded && (
-                  <div className="symbol-details">
+                  <div className="sym-detail">
+                    {/* Buy/Sell Summary Bar */}
+                    <div className="bs-bar">
+                      <div className="bs-side buy-side">
+                        <span className="bs-icon">🟢</span>
+                        <span className="bs-label">BUYS</span>
+                        <span className="bs-count">{buyTrades.length} orders</span>
+                        <span className="bs-vol">{fmt.usd(buyVol)}</span>
+                      </div>
+                      <div className="bs-side sell-side">
+                        <span className="bs-icon">🔴</span>
+                        <span className="bs-label">SELLS</span>
+                        <span className="bs-count">{sellTrades.length} orders</span>
+                        <span className="bs-vol">{fmt.usd(sellVol)}</span>
+                      </div>
+                    </div>
+
+                    {/* Round Trips */}
                     {pnl.rounds?.length > 0 && (
-                      <div className="rounds-section">
-                        <h4>Round Trips</h4>
-                        <div className="rounds-table">
-                          <div className="rounds-header">
-                            <span>Type</span><span>Buy Price</span><span>Sell Price</span><span>Qty</span>
-                            <span>Gross P&L</span><span>Buy Fee</span><span>Sell Fee</span><span>Total Fee</span>
-                            <span>Fee %</span><span>Net P&L</span><span>Net %</span><span>Hold Time</span>
+                      <div className="rounds">
+                        <h4>⚡ Round Trips</h4>
+                        <div className="rtable">
+                          <div className="rrow rhead">
+                            <span>Status</span><span>Entry</span><span>Exit</span><span>Qty</span>
+                            <span>Gross</span><span>Fees</span><span>Net P&L</span><span>ROI</span><span>Duration</span>
                           </div>
                           {pnl.rounds.map((r, i) => (
-                            <div key={i} className={`rounds-row ${r.type} ${r.netPnl >= 0 ? 'row-green' : 'row-red'}`}>
-                              <span className={`round-type ${r.type}`}>{r.type === 'closed' ? '✅ Closed' : '🔓 Open'}</span>
-                              <span>{formatUSD(r.buyPrice)}</span>
-                              <span>{r.sellPrice ? formatUSD(r.sellPrice) : `→ ${formatUSD(r.currentPrice)}`}</span>
-                              <span>{formatQty(r.qty)}</span>
-                              <span><PnlBadge value={r.grossPnl} /></span>
-                              <span className="fee-cell">{formatUSD(r.buyFee)}</span>
-                              <span className="fee-cell">{formatUSD(r.sellFee)}</span>
-                              <span className="fee-cell-total">{formatUSD(r.totalFee)}</span>
-                              <span className="fee-cell">{r.feePercent.toFixed(3)}%</span>
-                              <span><PnlBadge value={r.netPnl} /></span>
-                              <span><PnlPercent value={r.netPnlPercent} /></span>
-                              <span className="hold-time">{formatDuration(r.holdTimeMs)}</span>
+                            <div key={i} className={`rrow ${r.type} ${r.netPnl >= 0 ? 'rg' : 'rr'}`}>
+                              <span><Badge type={r.type}>{r.type === 'closed' ? '✅ Closed' : '🔓 Open'}</Badge></span>
+                              <span>{fmt.usd(r.buyPrice)}</span>
+                              <span>{r.sellPrice ? fmt.usd(r.sellPrice) : `→ ${fmt.usd(r.currentPrice)}`}</span>
+                              <span>{fmt.qty(r.qty)}</span>
+                              <span><PnL value={r.grossPnl} /></span>
+                              <span className="fee-val">-{fmt.usd(r.totalFee)}</span>
+                              <span><PnL value={r.netPnl} /></span>
+                              <span><Pct value={r.netPct} /></span>
+                              <span className="dur">{fmt.dur(r.holdTimeMs)}</span>
                             </div>
                           ))}
-                          <div className="rounds-row rounds-total">
-                            <span>TOTAL</span><span></span><span></span><span></span>
-                            <span><PnlBadge value={pnl.rounds.reduce((s, r) => s + r.grossPnl, 0)} /></span>
-                            <span className="fee-cell">{formatUSD(pnl.rounds.reduce((s, r) => s + r.buyFee, 0))}</span>
-                            <span className="fee-cell">{formatUSD(pnl.rounds.reduce((s, r) => s + r.sellFee, 0))}</span>
-                            <span className="fee-cell-total">{formatUSD(pnl.totalFees)}</span>
-                            <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span>
-                            <span><PnlBadge value={pnl.totalPnl} /></span>
-                            <span></span><span></span>
-                          </div>
                         </div>
                       </div>
                     )}
 
-                    <div className="trades-log">
-                      <h4>Trade Log</h4>
-                      <div className="log-table">
-                        <div className="log-header">
+                    {/* Trade Log — Clean, Merged */}
+                    <div className="tlog">
+                      <h4>📋 Order Log {filteredTrades.length !== sym.trades.length && `(${viewMode})`}</h4>
+                      <div className="ltable">
+                        <div className="lrow lhead">
                           <span>Time</span><span>Side</span><span>Price</span><span>Qty</span>
-                          <span>Total</span><span>Fee (USD)</span><span>Fee %</span><span>Type</span>
+                          <span>Total</span><span>Fee</span><span>Type</span>
                         </div>
-                        {sym.trades.map((t) => (
-                          <div key={t.id} className={`log-row ${t.side === 'BUY' ? 'buy-row' : 'sell-row'}`}>
-                            <span>{formatTime(t.time)}</span>
-                            <span className={`side-badge ${t.side.toLowerCase()}`}>{t.side}</span>
-                            <span>{formatUSD(t.price)}</span>
-                            <span>{formatQty(t.qty)}</span>
-                            <span>{formatUSD(t.quoteQty)}</span>
-                            <span className="fee-cell">{formatUSD(t.feeUSDT)}</span>
-                            <span className="fee-cell">{t.feePercent.toFixed(3)}%</span>
-                            <span className={`maker-badge ${t.isMaker ? 'maker' : 'taker'}`}>{t.isMaker ? 'Maker' : 'Taker'}</span>
+                        {filteredTrades.map((t) => (
+                          <div key={t.id} className={`lrow ${t.side === 'BUY' ? 'lbuy' : 'lsell'}`}>
+                            <span>{fmt.time(t.time)}</span>
+                            <span><Badge type={t.side.toLowerCase()}>{t.side}</Badge></span>
+                            <span>{fmt.usd(t.price)}</span>
+                            <span>{fmt.qty(t.qty)}{t.fillCount > 1 && <span className="fill-tag">{t.fillCount} fills</span>}</span>
+                            <span>{fmt.usd(t.quoteQty)}</span>
+                            <span className="fee-cell">
+                              {fmt.usd(t.feeUSD)}
+                              {t.feeAsset === 'BNB' && <span className="bnb-tag">BNB</span>}
+                            </span>
+                            <span><Badge type={t.isMaker ? 'maker' : 'taker'}>{t.isMaker ? 'Maker' : 'Taker'}</Badge></span>
                           </div>
                         ))}
-                        <div className="log-row log-total">
-                          <span>TOTAL</span><span>{sym.trades.length} trades</span><span></span><span></span>
-                          <span>{formatUSD(symbolVolume)}</span>
-                          <span className="fee-cell-total">{formatUSD(symbolFees)}</span>
-                          <span className="fee-cell">{symbolFeePercent.toFixed(3)}%</span><span></span>
-                        </div>
                       </div>
                     </div>
 
-                    <div className="fee-callout">
-                      <div className="fee-callout-title">💰 Fee Impact</div>
-                      <div className="fee-callout-grid">
-                        <div><div className="fc-label">Total Fees</div><div className="fc-value fee-highlight">{formatUSD(symbolFees)}</div></div>
-                        <div><div className="fc-label">Fee Rate</div><div className="fc-value">{symbolFeePercent.toFixed(3)}%</div></div>
-                        <div><div className="fc-label">Break-even Spread</div><div className="fc-value">{(symbolFeePercent * 2).toFixed(3)}%</div></div>
-                        <div><div className="fc-label">Fees as % of P&L</div>
-                          <div className="fc-value fee-highlight">
-                            {pnl.totalPnl !== 0 ? Math.abs((symbolFees / (Math.abs(pnl.totalPnl) + symbolFees)) * 100).toFixed(1) + '%' : '—'}
-                          </div>
-                        </div>
+                    {/* Fee Impact */}
+                    <div className="fee-box">
+                      <span className="fb-title">💰 Fee Impact</span>
+                      <div className="fb-grid">
+                        <div><span className="fb-l">Total</span><span className="fb-v fee-val">{fmt.usd(totalFees)}</span></div>
+                        <div><span className="fb-l">Rate</span><span className="fb-v">{(sym.trades.reduce((s, t) => s + t.quoteQty, 0) > 0 ? (totalFees / sym.trades.reduce((s, t) => s + t.quoteQty, 0) * 100) : 0).toFixed(3)}%</span></div>
+                        <div><span className="fb-l">Break-even</span><span className="fb-v">{((sym.trades.reduce((s, t) => s + t.quoteQty, 0) > 0 ? (totalFees / sym.trades.reduce((s, t) => s + t.quoteQty, 0) * 100) : 0) * 2).toFixed(3)}%</span></div>
+                        {hasBnbFees && <div><span className="fb-l">BNB Discount</span><span className="fb-v bnb-disc">Active ✓</span></div>}
                       </div>
                     </div>
 
-                    <div className="market-context">
-                      <span>24h High: {formatUSD(sym.ticker?.highPrice)}</span>
-                      <span>24h Low: {formatUSD(sym.ticker?.lowPrice)}</span>
-                      <span>24h Vol: {formatUSD(sym.ticker?.quoteVolume)}</span>
+                    {/* Market Context */}
+                    <div className="mkt">
+                      <span>24h H: {fmt.usd(sym.ticker?.highPrice)}</span>
+                      <span>24h L: {fmt.usd(sym.ticker?.lowPrice)}</span>
+                      <span>24h Vol: {fmt.usd(sym.ticker?.quoteVolume)}</span>
                     </div>
                   </div>
                 )}
@@ -529,18 +467,18 @@ export default function Dashboard() {
           })}
         </div>
       ) : (
-        <div className="empty-state">
+        <div className="empty">
           <div className="empty-icon">📭</div>
           <h3>No trades today yet</h3>
-          <p>Your trades will appear here in real-time as they execute on Binance.</p>
-          <p className="empty-time">Market opens fresh at 00:00 UTC</p>
+          <p>Trades appear in real-time as they execute on Binance.</p>
         </div>
       )}
 
-      <footer className="footer">
-        <span>Last updated: {lastRefresh?.toLocaleTimeString() || '—'}</span>
-        <span>Auto-refresh: {countdown}s</span>
-        <span className="live-dot-small" /> Connected via Dubai
+      {/* ===== FOOTER ===== */}
+      <footer className="ftr">
+        <span>Updated: {lastRefresh?.toLocaleTimeString() || '—'}</span>
+        <span>Next: {countdown}s</span>
+        <span className="live-dot-sm" /> Binance via proxy
       </footer>
     </div>
   );
