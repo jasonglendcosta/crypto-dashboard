@@ -1,3 +1,6 @@
+export const runtime = 'nodejs';
+export const preferredRegion = ['sin1', 'hnd1', 'cdg1']; // Singapore, Tokyo, Paris
+
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 

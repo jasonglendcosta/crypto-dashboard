@@ -1,3 +1,7 @@
+// Force Vercel to run this in a non-US region (Binance blocks US IPs)
+export const runtime = 'nodejs';
+export const preferredRegion = ['sin1', 'hnd1', 'cdg1']; // Singapore, Tokyo, Paris
+
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 
@@ -21,7 +25,7 @@ function getTodayStartUTC() {
   return now.getTime();
 }
 
-async function fetchSymbolTrades(symbol, startTime, timestamp, debug = false) {
+async function fetchSymbolTrades(symbol, startTime, timestamp) {
   const query = `symbol=${symbol}&startTime=${startTime}&timestamp=${timestamp}`;
   const signature = generateSignature(query);
   try {
@@ -30,11 +34,8 @@ async function fetchSymbolTrades(symbol, startTime, timestamp, debug = false) {
       { headers: { 'X-MBX-APIKEY': API_KEY }, cache: 'no-store' }
     );
     const data = await res.json();
-    if (debug && !Array.isArray(data)) {
-      console.error(`Binance error for ${symbol}:`, JSON.stringify(data));
-    }
-    return Array.isArray(data) ? data : (debug ? { _error: data } : []);
-  } catch (e) { return debug ? { _error: e.message } : []; }
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
 }
 
 async function fetchCurrentPrice(symbol) {
@@ -208,21 +209,12 @@ export async function GET() {
     const timestamp = Date.now();
     const todayStart = getTodayStartUTC();
 
-    // Debug: check if keys are available
-    if (!API_KEY || !SECRET) {
-      return NextResponse.json({ error: 'Missing Binance API keys', hasKey: !!API_KEY, hasSecret: !!SECRET }, { status: 500 });
-    }
-
-    // Fetch first symbol with debug to capture any Binance errors
-    const debugResult = await fetchSymbolTrades('BTCUSDT', todayStart, timestamp, true);
-    const debugError = debugResult?._error || null;
-
     const tradePromises = TRACKED_SYMBOLS.map(sym =>
       fetchSymbolTrades(sym, todayStart, timestamp).then(trades => ({ symbol: sym, trades }))
     );
 
     const allResults = await Promise.all(tradePromises);
-    const activeSymbols = allResults.filter(r => r.trades.length > 0 && !r.trades._error);
+    const activeSymbols = allResults.filter(r => r.trades.length > 0);
 
     // Also fetch BNB price for fee conversion
     let bnbPrice = 600;
@@ -312,7 +304,6 @@ export async function GET() {
         feePercent: totalVolume > 0 ? (dailyFees / totalVolume) * 100 : 0,
       },
       lastUpdated: new Date().toISOString(),
-      _debug: debugError ? { binanceError: debugError, keyPrefix: API_KEY?.slice(0, 4) + '...' } : undefined,
     });
   } catch (error) {
     console.error('Trades API error:', error);
