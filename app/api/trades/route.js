@@ -25,41 +25,57 @@ function getTodayStartUTC() {
   return now.getTime();
 }
 
+// Use api1 for non-US routing, fallback to api4 (EU)
+const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', 'https://api.binance.com'];
+
 async function fetchSymbolTrades(symbol, startTime, timestamp) {
   const query = `symbol=${symbol}&startTime=${startTime}&timestamp=${timestamp}`;
   const signature = generateSignature(query);
-  try {
-    const res = await fetch(
-      `https://api.binance.com/api/v3/myTrades?${query}&signature=${signature}`,
-      { headers: { 'X-MBX-APIKEY': API_KEY }, cache: 'no-store' }
-    );
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch { return []; }
+
+  for (const base of BINANCE_BASES) {
+    try {
+      const res = await fetch(
+        `${base}/api/v3/myTrades?${query}&signature=${signature}`,
+        { headers: { 'X-MBX-APIKEY': API_KEY }, cache: 'no-store' }
+      );
+      const data = await res.json();
+      if (Array.isArray(data)) return data;
+      if (data?.code === -2015 || data?.code === -1022) return []; // auth error, don't retry
+      // Geo-block or service error — try next base
+      continue;
+    } catch { continue; }
+  }
+  return [];
 }
 
 async function fetchCurrentPrice(symbol) {
-  try {
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`, { cache: 'no-store' });
-    const data = await res.json();
-    return parseFloat(data.price) || 0;
-  } catch { return 0; }
+  for (const base of BINANCE_BASES) {
+    try {
+      const res = await fetch(`${base}/api/v3/ticker/price?symbol=${symbol}`, { cache: 'no-store' });
+      const data = await res.json();
+      if (data.price) return parseFloat(data.price);
+    } catch { continue; }
+  }
+  return 0;
 }
 
 async function fetch24hTicker(symbol) {
-  try {
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`, { cache: 'no-store' });
-    const data = await res.json();
-    return {
-      priceChangePercent: parseFloat(data.priceChangePercent) || 0,
-      highPrice: parseFloat(data.highPrice) || 0,
-      lowPrice: parseFloat(data.lowPrice) || 0,
-      volume: parseFloat(data.volume) || 0,
-      quoteVolume: parseFloat(data.quoteVolume) || 0,
-    };
-  } catch {
-    return { priceChangePercent: 0, highPrice: 0, lowPrice: 0, volume: 0, quoteVolume: 0 };
+  for (const base of BINANCE_BASES) {
+    try {
+      const res = await fetch(`${base}/api/v3/ticker/24hr?symbol=${symbol}`, { cache: 'no-store' });
+      const data = await res.json();
+      if (data.priceChangePercent !== undefined) {
+        return {
+          priceChangePercent: parseFloat(data.priceChangePercent) || 0,
+          highPrice: parseFloat(data.highPrice) || 0,
+          lowPrice: parseFloat(data.lowPrice) || 0,
+          volume: parseFloat(data.volume) || 0,
+          quoteVolume: parseFloat(data.quoteVolume) || 0,
+        };
+      }
+    } catch { continue; }
   }
+  return { priceChangePercent: 0, highPrice: 0, lowPrice: 0, volume: 0, quoteVolume: 0 };
 }
 
 // Convert any commission to USDT value
@@ -217,12 +233,7 @@ export async function GET() {
     const activeSymbols = allResults.filter(r => r.trades.length > 0);
 
     // Also fetch BNB price for fee conversion
-    let bnbPrice = 600;
-    try {
-      const bnbRes = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', { cache: 'no-store' });
-      const bnbData = await bnbRes.json();
-      bnbPrice = parseFloat(bnbData.price) || 600;
-    } catch {}
+    let bnbPrice = await fetchCurrentPrice('BNBUSDT') || 600;
 
     const enriched = await Promise.all(
       activeSymbols.map(async ({ symbol, trades }) => {
