@@ -176,13 +176,49 @@ async function fetchAllData() {
       const pnl = calculatePnL(merged, currentPrice, bnbPrice);
 
       const feeToUSD = (c, a) => a === 'USDT' ? c : a === 'BNB' ? c * bnbPrice : c * currentPrice;
+
+      // Map round-trip P&L back onto individual trades
+      // Sells get realized P&L, open buys get unrealized P&L
+      const sellPnlMap = new Map(); // sellTime -> aggregated netPnl
+      const openBuyPnlMap = new Map(); // buyPrice (rounded) -> netPnl
+      for (const r of pnl.rounds) {
+        if (r.type === 'closed' && r.sellTime) {
+          // Group by sell time (multiple rounds can match same sell)
+          const existing = sellPnlMap.get(r.sellTime) || 0;
+          sellPnlMap.set(r.sellTime, existing + r.netPnl);
+        } else if (r.type === 'open') {
+          // Map open positions by buy price
+          const key = r.buyPrice.toFixed(8);
+          const existing = openBuyPnlMap.get(key) || 0;
+          openBuyPnlMap.set(key, existing + r.netPnl);
+        }
+      }
+
       const tradeLog = merged.map(t => {
         const feeUSD = feeToUSD(t.commission, t.commissionAsset);
+        const side = t.isBuyer ? 'BUY' : 'SELL';
+
+        let tradePnl = null;
+        let unrealizedPnl = null;
+
+        if (!t.isBuyer) {
+          // Check if this sell has matched round-trip P&L
+          tradePnl = sellPnlMap.get(t.time) ?? null;
+        } else {
+          // Check if this buy has an open position
+          const key = t.price.toFixed(8);
+          if (openBuyPnlMap.has(key)) {
+            unrealizedPnl = openBuyPnlMap.get(key);
+            openBuyPnlMap.delete(key); // consume so we don't double-count
+          }
+        }
+
         return {
-          id: t.id, orderId: t.orderId, time: t.time, side: t.isBuyer ? 'BUY' : 'SELL',
+          id: t.id, orderId: t.orderId, time: t.time, side,
           price: t.price, qty: t.qty, quoteQty: t.quoteQty,
           feeUSD, feePct: t.quoteQty > 0 ? (feeUSD / t.quoteQty) * 100 : 0,
           feeAsset: t.commissionAsset, isMaker: t.isMaker, fillCount: t.fillCount,
+          pnl: tradePnl, unrealizedPnl,
         };
       });
 
@@ -392,39 +428,13 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* Round Trips */}
-                    {pnl.rounds?.length > 0 && (
-                      <div className="rounds">
-                        <h4>⚡ Round Trips</h4>
-                        <div className="rtable">
-                          <div className="rrow rhead">
-                            <span>Status</span><span>Entry</span><span>Exit</span><span>Qty</span>
-                            <span>Gross</span><span>Fees</span><span>Net P&L</span><span>ROI</span><span>Duration</span>
-                          </div>
-                          {[...pnl.rounds].reverse().map((r, i) => (
-                            <div key={i} className={`rrow ${r.type} ${r.netPnl >= 0 ? 'rg' : 'rr'}`}>
-                              <span><Badge type={r.type}>{r.type === 'closed' ? '✅ Closed' : '🔓 Open'}</Badge></span>
-                              <span>{fmt.usd(r.buyPrice)}</span>
-                              <span>{r.sellPrice ? fmt.usd(r.sellPrice) : `→ ${fmt.usd(r.currentPrice)}`}</span>
-                              <span>{fmt.qty(r.qty)}</span>
-                              <span><PnL value={r.grossPnl} /></span>
-                              <span className="fee-val">-{fmt.usd(r.totalFee)}</span>
-                              <span><PnL value={r.netPnl} /></span>
-                              <span><Pct value={r.netPct} /></span>
-                              <span className="dur">{fmt.dur(r.holdTimeMs)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Trade Log — Clean, Merged */}
+                    {/* Trade Log — Clean, Merged + P&L */}
                     <div className="tlog">
                       <h4>📋 Order Log {filteredTrades.length !== sym.trades.length && `(${viewMode})`}</h4>
                       <div className="ltable">
                         <div className="lrow lhead">
                           <span>Time</span><span>Side</span><span>Price</span><span>Qty</span>
-                          <span>Total</span><span>Fee</span><span>Type</span>
+                          <span>Total</span><span>Fee</span><span>Fee %</span><span>P&L</span><span>Type</span>
                         </div>
                         {[...filteredTrades].reverse().map((t) => (
                           <div key={t.id} className={`lrow ${t.side === 'BUY' ? 'lbuy' : 'lsell'}`}>
@@ -437,20 +447,11 @@ export default function Dashboard() {
                               {fmt.usd(t.feeUSD)}
                               {t.feeAsset === 'BNB' && <span className="bnb-tag">BNB</span>}
                             </span>
+                            <span className="fee-val">{t.feePct.toFixed(3)}%</span>
+                            <span>{t.side === 'SELL' && t.pnl != null ? <PnL value={t.pnl} /> : t.side === 'BUY' && t.unrealizedPnl != null ? <span className="unreal"><PnL value={t.unrealizedPnl} /><span className="unreal-tag">open</span></span> : <span className="text2">—</span>}</span>
                             <span><Badge type={t.isMaker ? 'maker' : 'taker'}>{t.isMaker ? 'Maker' : 'Taker'}</Badge></span>
                           </div>
                         ))}
-                      </div>
-                    </div>
-
-                    {/* Fee Impact */}
-                    <div className="fee-box">
-                      <span className="fb-title">💰 Fee Impact</span>
-                      <div className="fb-grid">
-                        <div><span className="fb-l">Total</span><span className="fb-v fee-val">{fmt.usd(totalFees)}</span></div>
-                        <div><span className="fb-l">Rate</span><span className="fb-v">{(sym.trades.reduce((s, t) => s + t.quoteQty, 0) > 0 ? (totalFees / sym.trades.reduce((s, t) => s + t.quoteQty, 0) * 100) : 0).toFixed(3)}%</span></div>
-                        <div><span className="fb-l">Break-even</span><span className="fb-v">{((sym.trades.reduce((s, t) => s + t.quoteQty, 0) > 0 ? (totalFees / sym.trades.reduce((s, t) => s + t.quoteQty, 0) * 100) : 0) * 2).toFixed(3)}%</span></div>
-                        {hasBnbFees && <div><span className="fb-l">BNB Discount</span><span className="fb-v bnb-disc">Active ✓</span></div>}
                       </div>
                     </div>
 

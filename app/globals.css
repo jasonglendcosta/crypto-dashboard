@@ -128,24 +128,18 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-ser
 .bs-vol { margin-left: auto; font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 13px; }
 
 /* ===== ROUND TRIPS TABLE ===== */
-.rounds { margin-bottom: 14px; }
-.rounds h4 { font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--accent); }
-.rtable { font-size: 12px; }
-.rrow { display: grid; grid-template-columns: 90px 85px 85px 80px 90px 70px 90px 70px 70px; gap: 4px; padding: 6px 8px; align-items: center; border-radius: 4px; }
-.rhead { color: var(--text2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 4px; }
-.rg { background: rgba(0,230,118,0.03); }
-.rr { background: rgba(255,82,82,0.03); }
-.dur { color: var(--text2); }
-
 /* ===== TRADE LOG TABLE ===== */
 .tlog { margin-bottom: 14px; }
 .tlog h4 { font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--accent); }
 .ltable { font-size: 12px; }
-.lrow { display: grid; grid-template-columns: 80px 65px 95px 110px 90px 90px 70px; gap: 4px; padding: 6px 8px; align-items: center; border-radius: 4px; }
+.lrow { display: grid; grid-template-columns: 80px 60px 90px 100px 85px 80px 60px 90px 65px; gap: 4px; padding: 6px 8px; align-items: center; border-radius: 4px; }
 .lhead { color: var(--text2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 4px; }
 .lbuy { background: rgba(0,230,118,0.03); border-left: 2px solid var(--green); }
 .lsell { background: rgba(255,82,82,0.03); border-left: 2px solid var(--red); }
 .fee-cell { color: var(--yellow); display: flex; align-items: center; gap: 3px; }
+.unreal { display: flex; align-items: center; gap: 3px; }
+.unreal-tag { font-size: 9px; color: var(--text2); background: var(--bg3); border-radius: 3px; padding: 1px 4px; }
+.text2 { color: var(--text2); }
 
 /* ===== FEE BOX ===== */
 .fee-box { background: var(--bg3); border: 1px solid rgba(255,215,64,0.15); border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; }
@@ -173,8 +167,7 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-ser
   .hero-stats { gap: 16px; }
   .pills { gap: 4px; }
   .pill { padding: 6px 8px; min-width: 60px; }
-  .rrow { grid-template-columns: 70px 70px 70px 60px 75px 55px 75px 55px 55px; font-size: 11px; }
-  .lrow { grid-template-columns: 65px 55px 80px 90px 75px 75px 60px; font-size: 11px; }
+  .lrow { grid-template-columns: 60px 50px 75px 80px 70px 65px 50px 75px 55px; font-size: 11px; }
   .bs-bar { flex-direction: column; }
   .sym-hdr { flex-direction: column; gap: 8px; }
   .sym-r { width: 100%; justify-content: space-between; }
