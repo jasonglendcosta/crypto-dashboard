@@ -1,12 +1,13 @@
-// Force Vercel to run this in a non-US region (Binance blocks US IPs)
-export const runtime = 'nodejs';
-export const preferredRegion = ['sin1', 'hnd1', 'cdg1']; // Singapore, Tokyo, Paris
+/**
+ * Trades API — Vercel Edge Runtime
+ * 
+ * Runs at the NEAREST EDGE to the requesting user (Dubai for Jason).
+ * This bypasses Binance's US geo-block since Edge != US East datacenter.
+ * 
+ * Edge Runtime uses Web Crypto API (no Node.js crypto module).
+ */
 
-import { NextResponse } from 'next/server';
-import crypto from 'crypto';
-
-const API_KEY = process.env.BINANCE_API_KEY;
-const SECRET = process.env.BINANCE_SECRET;
+export const runtime = 'edge';
 
 const TRACKED_SYMBOLS = [
   'BTCUSDT', 'TAOUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT',
@@ -15,8 +16,21 @@ const TRACKED_SYMBOLS = [
   'AVAXUSDT', 'LINKUSDT', 'MATICUSDT', 'APTUSDT', 'NEARUSDT'
 ];
 
-function generateSignature(queryString) {
-  return crypto.createHmac('sha256', SECRET).update(queryString).digest('hex');
+const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', 'https://api.binance.com'];
+
+// Web Crypto API HMAC-SHA256 (Edge compatible)
+async function generateSignature(queryString) {
+  const secret = process.env.BINANCE_SECRET;
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(queryString));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function getTodayStartUTC() {
@@ -25,23 +39,19 @@ function getTodayStartUTC() {
   return now.getTime();
 }
 
-// Use api1 for non-US routing, fallback to api4 (EU)
-const BINANCE_BASES = ['https://api1.binance.com', 'https://api4.binance.com', 'https://api.binance.com'];
-
-async function fetchSymbolTrades(symbol, startTime, timestamp) {
+async function fetchSymbolTrades(symbol, startTime, timestamp, apiKey) {
   const query = `symbol=${symbol}&startTime=${startTime}&timestamp=${timestamp}`;
-  const signature = generateSignature(query);
+  const signature = await generateSignature(query);
 
   for (const base of BINANCE_BASES) {
     try {
       const res = await fetch(
         `${base}/api/v3/myTrades?${query}&signature=${signature}`,
-        { headers: { 'X-MBX-APIKEY': API_KEY }, cache: 'no-store' }
+        { headers: { 'X-MBX-APIKEY': apiKey } }
       );
       const data = await res.json();
       if (Array.isArray(data)) return data;
-      if (data?.code === -2015 || data?.code === -1022) return []; // auth error, don't retry
-      // Geo-block or service error — try next base
+      if (data?.code === -2015 || data?.code === -1022) return [];
       continue;
     } catch { continue; }
   }
@@ -51,7 +61,7 @@ async function fetchSymbolTrades(symbol, startTime, timestamp) {
 async function fetchCurrentPrice(symbol) {
   for (const base of BINANCE_BASES) {
     try {
-      const res = await fetch(`${base}/api/v3/ticker/price?symbol=${symbol}`, { cache: 'no-store' });
+      const res = await fetch(`${base}/api/v3/ticker/price?symbol=${symbol}`);
       const data = await res.json();
       if (data.price) return parseFloat(data.price);
     } catch { continue; }
@@ -62,7 +72,7 @@ async function fetchCurrentPrice(symbol) {
 async function fetch24hTicker(symbol) {
   for (const base of BINANCE_BASES) {
     try {
-      const res = await fetch(`${base}/api/v3/ticker/24hr?symbol=${symbol}`, { cache: 'no-store' });
+      const res = await fetch(`${base}/api/v3/ticker/24hr?symbol=${symbol}`);
       const data = await res.json();
       if (data.priceChangePercent !== undefined) {
         return {
@@ -78,19 +88,13 @@ async function fetch24hTicker(symbol) {
   return { priceChangePercent: 0, highPrice: 0, lowPrice: 0, volume: 0, quoteVolume: 0 };
 }
 
-// Convert any commission to USDT value
-function commissionToUSDT(commission, commissionAsset, assetPrice, currentPrice) {
+function commissionToUSDT(commission, commissionAsset, assetPrice, currentPrice, bnbPrice) {
   if (commissionAsset === 'USDT') return commission;
-  if (commissionAsset === 'BNB') {
-    // BNB fee discount case — use a rough BNB price or fetch separately
-    // For now approximate using the trade's implied conversion
-    return commission * 600; // Rough BNB price — will be replaced with live
-  }
-  // Commission in the traded asset (e.g. BTC) — use current price for accuracy
+  if (commissionAsset === 'BNB') return commission * bnbPrice;
   return commission * currentPrice;
 }
 
-function calculatePnL(trades, currentPrice) {
+function calculatePnL(trades, currentPrice, bnbPrice) {
   const buys = [];
   const sells = [];
 
@@ -105,15 +109,14 @@ function calculatePnL(trades, currentPrice) {
       commissionAsset: t.commissionAsset,
       time: t.time,
       isBuyer: t.isBuyer,
-      // Fee in USDT for this individual trade
       feeUSDT: commissionToUSDT(
         parseFloat(t.commission),
         t.commissionAsset,
         parseFloat(t.price),
-        currentPrice
+        currentPrice,
+        bnbPrice
       ),
     };
-    // Fee as % of trade value
     entry.feePercent = (entry.feeUSDT / entry.quoteQty) * 100;
     if (t.isBuyer) buys.push(entry);
     else sells.push(entry);
@@ -127,7 +130,6 @@ function calculatePnL(trades, currentPrice) {
   buys.sort((a, b) => a.time - b.time);
   sells.sort((a, b) => a.time - b.time);
 
-  // FIFO matching
   const unmatchedBuys = [...buys];
   sells.forEach(sell => {
     let remainingSellQty = sell.qty;
@@ -138,8 +140,7 @@ function calculatePnL(trades, currentPrice) {
       const grossPnl = (sell.price - buy.price) * matchQty;
       const pnlPercent = ((sell.price - buy.price) / buy.price) * 100;
 
-      // Pro-rate fees based on matched qty
-      const buyFee = buy.feeUSDT * (matchQty / (buy.qty + (buy._matchedQty || 0) > buy.qty ? buy.qty : buy.qty));
+      const buyFee = buy.feeUSDT * (matchQty / buy.qty);
       const sellFee = sell.feeUSDT * (matchQty / sell.qty);
       const totalRoundFee = buyFee + sellFee;
       const netPnl = grossPnl - totalRoundFee;
@@ -172,12 +173,11 @@ function calculatePnL(trades, currentPrice) {
     }
   });
 
-  // Open positions
   unmatchedBuys.forEach(buy => {
     if (buy.qty > 0.000001) {
       const grossPnl = (currentPrice - buy.price) * buy.qty;
       const pnlPercent = ((currentPrice - buy.price) / buy.price) * 100;
-      const entryFee = buy.feeUSDT * (buy.qty / (buy.qty)); // remaining portion
+      const entryFee = buy.feeUSDT;
       const netPnl = grossPnl - entryFee;
       const netPnlPercent = (netPnl / (buy.price * buy.qty)) * 100;
 
@@ -206,9 +206,6 @@ function calculatePnL(trades, currentPrice) {
     }
   });
 
-  // Build per-trade fee details for the trade log
-  const allTrades = [...buys, ...sells].sort((a, b) => a.time - b.time);
-
   return {
     rounds,
     totalBuys: buys.length,
@@ -222,18 +219,18 @@ function calculatePnL(trades, currentPrice) {
 
 export async function GET() {
   try {
+    const API_KEY = process.env.BINANCE_API_KEY;
     const timestamp = Date.now();
     const todayStart = getTodayStartUTC();
 
     const tradePromises = TRACKED_SYMBOLS.map(sym =>
-      fetchSymbolTrades(sym, todayStart, timestamp).then(trades => ({ symbol: sym, trades }))
+      fetchSymbolTrades(sym, todayStart, timestamp, API_KEY).then(trades => ({ symbol: sym, trades }))
     );
 
     const allResults = await Promise.all(tradePromises);
     const activeSymbols = allResults.filter(r => r.trades.length > 0);
 
-    // Also fetch BNB price for fee conversion
-    let bnbPrice = await fetchCurrentPrice('BNBUSDT') || 600;
+    const bnbPrice = await fetchCurrentPrice('BNBUSDT') || 600;
 
     const enriched = await Promise.all(
       activeSymbols.map(async ({ symbol, trades }) => {
@@ -243,9 +240,8 @@ export async function GET() {
         ]);
 
         const asset = symbol.replace('USDT', '');
-        const pnl = calculatePnL(trades, currentPrice);
+        const pnl = calculatePnL(trades, currentPrice, bnbPrice);
 
-        // Build enriched trade log with per-trade fees in USDT
         const tradeLog = trades.map(t => {
           const commission = parseFloat(t.commission);
           const commAsset = t.commissionAsset;
@@ -275,14 +271,7 @@ export async function GET() {
           };
         });
 
-        return {
-          symbol,
-          asset,
-          currentPrice,
-          ticker,
-          trades: tradeLog,
-          pnl,
-        };
+        return { symbol, asset, currentPrice, ticker, trades: tradeLog, pnl };
       })
     );
 
@@ -300,7 +289,7 @@ export async function GET() {
       e.trades.forEach(t => { totalVolume += t.quoteQty; });
     });
 
-    return NextResponse.json({
+    return new Response(JSON.stringify({
       date: new Date().toISOString().split('T')[0],
       todayStartUTC: todayStart,
       symbols: enriched,
@@ -315,12 +304,15 @@ export async function GET() {
         feePercent: totalVolume > 0 ? (dailyFees / totalVolume) * 100 : 0,
       },
       lastUpdated: new Date().toISOString(),
+      edge: true, // Flag to confirm running on edge
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
     });
   } catch (error) {
-    console.error('Trades API error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch trades', details: error.message },
-      { status: 500 }
+    return new Response(
+      JSON.stringify({ error: 'Failed to fetch trades', details: error.message }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }
