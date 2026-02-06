@@ -20,8 +20,8 @@ export async function POST(request) {
       return Response.json({ error: 'Missing queryString' }, { status: 400 });
     }
 
-    const secret = process.env.BINANCE_SECRET;
-    const apiKey = process.env.BINANCE_API_KEY;
+    const secret = (process.env.BINANCE_SECRET || '').trim();
+    const apiKey = (process.env.BINANCE_API_KEY || '').trim();
     
     if (!secret || !apiKey) {
       return Response.json({ error: 'Server not configured' }, { status: 500 });
