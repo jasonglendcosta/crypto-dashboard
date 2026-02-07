@@ -154,15 +154,19 @@ function buildTradeLog(mergedTrades, currentPrice, bnbPrice) {
 }
 
 // ===================== DATA FETCHING =====================
-async function fetchAllData() {
-  const todayStart = new Date();
-  todayStart.setUTCHours(0, 0, 0, 0);
-  const startTime = String(todayStart.getTime());
+async function fetchAllData(selectedDate = null) {
+  // If selectedDate is provided (YYYY-MM-DD), use it; otherwise defaults to today
+  const dateObj = selectedDate ? new Date(selectedDate + 'T00:00:00Z') : new Date();
+  dateObj.setUTCHours(0, 0, 0, 0);
+  const startTime = String(dateObj.getTime());
+  const endTime = selectedDate ? String(dateObj.getTime() + 24 * 60 * 60 * 1000 - 1) : null;
 
   const tradeResults = await Promise.all(
     TRACKED_SYMBOLS.map(async (symbol) => {
       try {
-        const data = await proxy('/api/v3/myTrades', { symbol, startTime }, true);
+        const params = { symbol, startTime };
+        if (endTime) params.endTime = endTime;
+        const data = await proxy('/api/v3/myTrades', params, true);
         return { symbol, trades: Array.isArray(data) ? data : [] };
       } catch { return { symbol, trades: [] }; }
     })
@@ -278,6 +282,10 @@ function Badge({ type, children }) {
 }
 
 // ===================== DASHBOARD =====================
+function getTodayStr() {
+  return new Date().toISOString().split('T')[0];
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -286,21 +294,63 @@ export default function Dashboard() {
   const [countdown, setCountdown] = useState(30);
   const [expandedSymbol, setExpandedSymbol] = useState(null);
   const [viewMode, setViewMode] = useState('all');
+  const [selectedDate, setSelectedDate] = useState(getTodayStr());
   const timerRef = useRef(null);
+
+  const isToday = selectedDate === getTodayStr();
 
   const fetchAll = useCallback(async () => {
     try {
-      const result = await fetchAllData();
+      const result = await fetchAllData(isToday ? null : selectedDate);
       setData(result);
       setLastRefresh(new Date());
       setCountdown(30);
       setError(null);
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
-  }, []);
+  }, [selectedDate, isToday]);
 
-  useEffect(() => { fetchAll(); const i = setInterval(fetchAll, 30000); return () => clearInterval(i); }, [fetchAll]);
-  useEffect(() => { timerRef.current = setInterval(() => setCountdown(c => c <= 1 ? 30 : c - 1), 1000); return () => clearInterval(timerRef.current); }, []);
+  useEffect(() => {
+    setLoading(true);
+    fetchAll();
+    // Only auto-refresh if viewing today
+    if (isToday) {
+      const i = setInterval(fetchAll, 30000);
+      return () => clearInterval(i);
+    }
+  }, [fetchAll, isToday]);
+
+  useEffect(() => {
+    if (isToday) {
+      timerRef.current = setInterval(() => setCountdown(c => c <= 1 ? 30 : c - 1), 1000);
+      return () => clearInterval(timerRef.current);
+    } else {
+      setCountdown(0);
+    }
+  }, [isToday]);
+
+  const handleDateChange = (e) => {
+    setSelectedDate(e.target.value);
+    setExpandedSymbol(null);
+  };
+
+  const goToToday = () => {
+    setSelectedDate(getTodayStr());
+  };
+
+  const goToPrevDay = () => {
+    const d = new Date(selectedDate + 'T12:00:00');
+    d.setDate(d.getDate() - 1);
+    setSelectedDate(d.toISOString().split('T')[0]);
+  };
+
+  const goToNextDay = () => {
+    const d = new Date(selectedDate + 'T12:00:00');
+    d.setDate(d.getDate() + 1);
+    const today = getTodayStr();
+    const next = d.toISOString().split('T')[0];
+    if (next <= today) setSelectedDate(next);
+  };
 
   if (loading) return (
     <div className="dash"><div className="loading"><div className="spinner" /><p>Connecting to Binance...</p></div></div>
@@ -315,11 +365,28 @@ export default function Dashboard() {
       <header className="hdr">
         <div className="hdr-l">
           <h1>⚡ CRYPTO COMMAND</h1>
-          <span className="hdr-date">{new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</span>
+          <div className="date-nav">
+            <button className="date-btn" onClick={goToPrevDay} title="Previous day">◀</button>
+            <input
+              type="date"
+              className="date-picker"
+              value={selectedDate}
+              max={getTodayStr()}
+              onChange={handleDateChange}
+            />
+            <button className="date-btn" onClick={goToNextDay} disabled={isToday} title="Next day">▶</button>
+            {!isToday && <button className="date-btn today-btn" onClick={goToToday}>Today</button>}
+          </div>
         </div>
         <div className="hdr-r">
-          <div className="live"><span className="live-dot" />LIVE</div>
-          <span className="cd">{countdown}s</span>
+          {isToday ? (
+            <>
+              <div className="live"><span className="live-dot" />LIVE</div>
+              <span className="cd">{countdown}s</span>
+            </>
+          ) : (
+            <span className="hist-badge">📅 Historical</span>
+          )}
           <button className="btn-ref" onClick={fetchAll}>↻</button>
         </div>
       </header>
@@ -329,7 +396,7 @@ export default function Dashboard() {
       {/* P&L HERO */}
       <div className={`hero ${summary.totalPnl >= 0 ? 'hero-g' : 'hero-r'}`}>
         <div className="hero-main">
-          <span className="hero-lbl">Today&apos;s P&amp;L</span>
+          <span className="hero-lbl">{isToday ? "Today's" : new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} P&amp;L</span>
           <PnL value={summary.totalPnl || 0} size="xl" />
         </div>
         <div className="hero-stats">

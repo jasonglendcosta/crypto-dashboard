@@ -162,4 +162,54 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-ser
   .sym-r { width: 100%; justify-content: space-between; }
   .pnl.xl { font-size: 22px; }
   .hdr h1 { font-size: 16px; }
+  .date-nav { flex-wrap: wrap; justify-content: center; }
+  .date-picker { width: 130px; font-size: 12px; padding: 4px 6px; }
+}
+
+/* ===== DATE PICKER ===== */
+.hdr-l { display: flex; flex-direction: column; gap: 8px; }
+.date-nav { display: flex; align-items: center; gap: 6px; }
+.date-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+  font-family: 'Inter', sans-serif;
+}
+.date-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.date-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.today-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  font-weight: 600;
+  padding: 5px 14px;
+}
+.today-btn:hover { background: var(--accent2); }
+.date-picker {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.date-picker:hover, .date-picker:focus { border-color: var(--accent); }
+.date-picker::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+.hist-badge {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  letter-spacing: 0.5px;
 }

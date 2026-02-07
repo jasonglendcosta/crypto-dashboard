@@ -25,14 +25,20 @@ function generateSignature(queryString) {
   return createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
-function getTodayStartUTC() {
-  const now = new Date();
-  now.setUTCHours(0, 0, 0, 0);
-  return now.getTime();
+function getDayStartUTC(dateStr) {
+  // dateStr format: YYYY-MM-DD (optional, defaults to today)
+  const d = dateStr ? new Date(dateStr + 'T00:00:00Z') : new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
 }
 
-async function fetchSymbolTrades(symbol, startTime, timestamp, apiKey) {
-  const query = `symbol=${symbol}&startTime=${startTime}&timestamp=${timestamp}`;
+function getDayEndUTC(startTime) {
+  return startTime + 24 * 60 * 60 * 1000 - 1; // end of day
+}
+
+async function fetchSymbolTrades(symbol, startTime, endTime, timestamp, apiKey) {
+  const endParam = endTime ? `&endTime=${endTime}` : '';
+  const query = `symbol=${symbol}&startTime=${startTime}${endParam}&timestamp=${timestamp}`;
   const signature = generateSignature(query);
   let lastError = null;
 
@@ -212,14 +218,18 @@ function calculatePnL(trades, currentPrice, bnbPrice) {
   };
 }
 
-export async function GET() {
+export async function GET(request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const dateParam = searchParams.get('date'); // YYYY-MM-DD or null for today
+
     const API_KEY = process.env.BINANCE_API_KEY;
     const timestamp = Date.now();
-    const todayStart = getTodayStartUTC();
+    const dayStart = getDayStartUTC(dateParam);
+    const dayEnd = dateParam ? getDayEndUTC(dayStart) : null; // only limit end for historical
 
     const tradePromises = TRACKED_SYMBOLS.map(sym =>
-      fetchSymbolTrades(sym, todayStart, timestamp, API_KEY).then(trades => ({ symbol: sym, trades }))
+      fetchSymbolTrades(sym, dayStart, dayEnd, timestamp, API_KEY).then(trades => ({ symbol: sym, trades }))
     );
 
     const allResults = await Promise.all(tradePromises);
@@ -284,9 +294,13 @@ export async function GET() {
       e.trades.forEach(t => { totalVolume += t.quoteQty; });
     });
 
+    const selectedDate = dateParam || new Date().toISOString().split('T')[0];
+    const isToday = !dateParam || selectedDate === new Date().toISOString().split('T')[0];
+
     return new Response(JSON.stringify({
-      date: new Date().toISOString().split('T')[0],
-      todayStartUTC: todayStart,
+      date: selectedDate,
+      isToday,
+      dayStartUTC: dayStart,
       symbols: enriched,
       summary: {
         totalTrades,
